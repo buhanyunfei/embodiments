@@ -1,0 +1,125 @@
+schema: embodiment_package/v1
+package_id: unitree_g1_sensor_only
+name: Unitree G1 Sensor-only Embodiment
+version: 0.2.0
+kind: robot
+license: Apache-2.0
+summary: Sensor-only embodiment package for Unitree G1. Motion, manipulation, and audio output forbidden by default.
+maintainers:
+  - name: Auwomo PhysClaw Runtime
+tags:
+  - unitree
+  - g1
+  - humanoid
+  - sensor-only
+  - realsense
+primary_agent_doc: EMBODIMENT.md
+models:
+  - model_id: unitree_g1
+    display_name: Unitree G1
+    embodiment: humanoid_sensor_only
+    default_safety_level: sensor_only
+    default_capabilities:
+      - discover
+      - health_check
+      - perceive
+      - observe
+      - inspect
+      - listen
+    sensors:
+      - rgb_camera
+      - depth_camera
+      - imu
+      - microphone
+    forbidden_by_default:
+      - navigate
+      - walk
+      - move
+      - turn
+      - grasp
+      - pick
+      - place
+      - carry
+      - hand_over
+      - open_door
+      - whole_body_motion
+      - arm_motion
+      - hand_motion
+      - audio_output
+adapters:
+  - adapter_id: g1_sensor_only_http
+    type: http
+    contract: embodiment_endpoint_contract/v0.1
+    entrypoint: adapters/g1_sensor_only_adapter.py
+    supports:
+      - health
+      - state
+      - sensors
+      - sense_capture
+      - audio_record
+probes:
+  passive: probes/passive_probe.py
+  sensor: probes/sensor_probe.py
+registry:
+  schema: embodiment_node_registry/v1
+  nodes:
+    - id: g1_real_sensor_only
+      name: G1 Sensor-Only Observer
+      node_type: physical_robot
+      role: robot_local_view
+      safe_capabilities:
+        - observe
+        - inspect
+        - listen
+        - perceive
+        - health_check
+      sensors:
+        - realsense_color_camera
+        - realsense_depth_camera
+        - onboard_audio_capture
+        - lowstate_readonly
+      limits:
+        sensor_only: true
+        movement_allowed: false
+        manipulation_allowed: false
+      standalone_only: false
+      endpoint_configured: false
+    - id: g1_realsense_color_sensor
+      name: G1 RealSense Color Sensor
+      node_type: sensor
+      role: robot_local_view
+      safe_capabilities:
+        - observe
+        - perceive
+      sensors:
+        - rgb_camera
+      limits:
+        sensor_only: true
+      standalone_only: false
+      endpoint_configured: false
+      parent_robot: g1_real_sensor_only
+safety:
+  default_policy: sensor_only
+  install_must_not_actuate: true
+  requires_confirmation_for:
+    - any_motion
+    - any_manipulation
+    - audio_output
+  forbidden_actions:
+    - navigate
+    - walk
+    - move
+    - turn
+    - grasp
+    - pick
+    - place
+    - carry
+    - hand_over
+    - open_door
+    - whole_body_motion
+    - arm_motion
+    - hand_motion
+    - audio_output
+compatibility:
+  runtime: auwomo_physclaw>=0.3
+  python: '>=3.9'

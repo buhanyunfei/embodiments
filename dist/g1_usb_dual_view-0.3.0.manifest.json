@@ -1,0 +1,334 @@
+{
+  "schema": "embodiment_manifest/v1",
+  "built_at": 1777473129.5406497,
+  "package": {
+    "schema": "embodiment_package/v2",
+    "package_id": "g1_usb_dual_view",
+    "name": "G1 + USB Camera Dual-view Embodiment Context",
+    "version": "0.3.0",
+    "kind": "embodiment_context",
+    "license": "Apache-2.0",
+    "summary": "Sensor-only context combining G1 RealSense ego view with an external USB camera for dual-view perception.",
+    "maintainers": [
+      {
+        "name": "Auwomo PhysClaw Runtime"
+      }
+    ],
+    "tags": [
+      "g1",
+      "usb-camera",
+      "dual-view",
+      "sensor-fusion",
+      "sensor-only"
+    ],
+    "primary_agent_doc": "EMBODIMENT.md",
+    "dependencies": {
+      "embodiments": [
+        {
+          "package_id": "unitree_g1_sensor_only",
+          "version": ">=0.2.0"
+        },
+        {
+          "package_id": "usb_1080p_camera",
+          "version": ">=0.2.0"
+        }
+      ]
+    },
+    "registry": {
+      "schema": "embodiment_node_registry/v1",
+      "nodes": [
+        {
+          "id": "g1_real_sensor_only",
+          "name": "G1 Sensor-Only Observer",
+          "node_type": "physical_robot",
+          "role": "robot_local_view",
+          "safe_capabilities": [
+            "observe",
+            "inspect",
+            "perceive"
+          ],
+          "sensors": [
+            "realsense_color_camera"
+          ],
+          "limits": {
+            "sensor_only": true,
+            "movement_allowed": false,
+            "manipulation_allowed": false
+          },
+          "standalone_only": false,
+          "endpoint_configured": false
+        },
+        {
+          "id": "g1_realsense_color_sensor",
+          "name": "G1 RealSense Color Sensor",
+          "node_type": "sensor",
+          "role": "robot_local_view",
+          "safe_capabilities": [
+            "observe",
+            "perceive"
+          ],
+          "sensors": [
+            "rgb_camera"
+          ],
+          "limits": {
+            "sensor_only": true
+          },
+          "standalone_only": false,
+          "endpoint_configured": false,
+          "parent_robot": "g1_real_sensor_only"
+        },
+        {
+          "id": "usb_camera_real",
+          "name": "External USB Camera",
+          "node_type": "sensor",
+          "role": "external_view",
+          "safe_capabilities": [
+            "observe",
+            "perceive"
+          ],
+          "sensors": [
+            "rgb_camera"
+          ],
+          "limits": {
+            "sensor_only": true
+          },
+          "standalone_only": false,
+          "endpoint_configured": false
+        }
+      ]
+    },
+    "graphs": [
+      {
+        "schema": "embodiment_graph/v2",
+        "graph_id": "sensor_only_dual_view_observation",
+        "name": "G1 RealSense + External USB Camera Sensor-only Dual-view Observation",
+        "intent": "Describe the workspace using both G1 ego RealSense view and an external USB third-person view, without moving any robot.",
+        "safety_level": "sensor_only",
+        "roles": [
+          {
+            "role_id": "robot_local_view",
+            "description": "Ego/first-person view from a robot-mounted RealSense color stream.",
+            "required_capabilities": [
+              "observe"
+            ],
+            "preferred_nodes": [
+              "g1_realsense_color_sensor"
+            ],
+            "minimum": 1,
+            "maximum": 1
+          },
+          {
+            "role_id": "external_view",
+            "description": "Third-person view from an external USB camera fixed in the workspace.",
+            "required_capabilities": [
+              "observe"
+            ],
+            "preferred_nodes": [
+              "usb_camera_real"
+            ],
+            "minimum": 1,
+            "maximum": 1
+          },
+          {
+            "role_id": "perception_model",
+            "description": "VLM/perception model that fuses the two views into a scene description.",
+            "required_capabilities": [
+              "image_understanding"
+            ],
+            "minimum": 1,
+            "maximum": 1
+          }
+        ],
+        "nodes": [
+          {
+            "id": "g1_realsense_color_sensor",
+            "role": "robot_local_view",
+            "node_type": "sensor",
+            "required_capabilities": [
+              "observe"
+            ]
+          },
+          {
+            "id": "usb_camera_real",
+            "role": "external_view",
+            "node_type": "sensor",
+            "required_capabilities": [
+              "observe"
+            ]
+          },
+          {
+            "id": "perception_vision",
+            "role": "perception_model",
+            "node_type": "perception_model",
+            "required_capabilities": [
+              "image_understanding"
+            ]
+          }
+        ],
+        "edges": [
+          {
+            "source": "g1_realsense_color_sensor",
+            "target": "perception_vision",
+            "edge_type": "observation_stream"
+          },
+          {
+            "source": "usb_camera_real",
+            "target": "perception_vision",
+            "edge_type": "observation_stream"
+          }
+        ],
+        "constraints": {
+          "allow_motion": false,
+          "allow_manipulation": false,
+          "allow_audio_output": false,
+          "forbidden_actions": [
+            "navigate",
+            "walk",
+            "move",
+            "turn",
+            "grasp",
+            "pick",
+            "place",
+            "carry",
+            "hand_over",
+            "open_door",
+            "whole_body_motion",
+            "arm_motion",
+            "hand_motion",
+            "audio_output"
+          ]
+        },
+        "readiness_checks": [
+          "all_required_nodes_exist",
+          "required_capabilities_are_safe",
+          "sensor_artifacts_available_or_capture_allowed",
+          "no_forbidden_action_in_task"
+        ],
+        "failure_modes": [
+          {
+            "id": "node_missing",
+            "when": "g1_realsense_color_sensor or usb_camera_real not in topology",
+            "attribution": "topology"
+          },
+          {
+            "id": "node_offline",
+            "when": "capture probe fails for either sensor",
+            "attribution": "hardware"
+          },
+          {
+            "id": "forbidden_action_requested",
+            "when": "task asks for any locomotion/manipulation/audio_output",
+            "attribution": "planner"
+          },
+          {
+            "id": "sensor_artifact_missing",
+            "when": "at least one expected frame file is not produced",
+            "attribution": "sensor"
+          }
+        ],
+        "recovery": {
+          "auto_allowed": [
+            "retry_passive_health_check",
+            "downgrade_multiview_to_single_view"
+          ],
+          "requires_confirmation": [
+            "any_motion",
+            "any_manipulation",
+            "audio_output"
+          ],
+          "not_recoverable": [
+            "missing_capable_executor"
+          ]
+        },
+        "outputs": [
+          "dual_view_scene_description",
+          "sensor_readiness_report",
+          "failure_attribution",
+          "episode_trace"
+        ]
+      }
+    ],
+    "safety": {
+      "default_policy": "sensor_only",
+      "install_must_not_actuate": true,
+      "requires_confirmation_for": [
+        "any_motion",
+        "any_manipulation",
+        "audio_output",
+        "safety_level_promotion"
+      ],
+      "forbidden_actions": [
+        "navigate",
+        "walk",
+        "move",
+        "turn",
+        "grasp",
+        "pick",
+        "place",
+        "carry",
+        "hand_over",
+        "open_door",
+        "whole_body_motion",
+        "arm_motion",
+        "hand_motion",
+        "audio_output"
+      ]
+    },
+    "integration": {
+      "exposes_agent_context": true,
+      "compatible_with": [
+        "auwomo_physclaw",
+        "openclaw_like_runtime"
+      ]
+    },
+    "compatibility": {
+      "runtime": "auwomo_physclaw>=0.3",
+      "python": ">=3.9"
+    }
+  },
+  "package_dir": "embodiments/packages/g1_usb_dual_view",
+  "files": [
+    {
+      "path": "EMBODIMENT.md",
+      "sha256": "51d661681f3a9801cb5f17232cc3c13f542fd8b1c4c326636497b79d51347fc6",
+      "bytes": 4181
+    },
+    {
+      "path": "embodiment.yaml",
+      "sha256": "c32aa578d0548fbbb52fdd1bf59fce089fbb0758bf324ef2a88ea327fc2d07eb",
+      "bytes": 5552
+    },
+    {
+      "path": "evidence/probe_2026-04-28.json",
+      "sha256": "cee7640fe1046f1872f7d3c0a9c6dcbcddb8a1034b1f2003f0763e21c9758ce3",
+      "bytes": 679
+    }
+  ],
+  "safety_summary": {
+    "default_policy": "sensor_only",
+    "requires_confirmation_for": [
+      "any_motion",
+      "any_manipulation",
+      "audio_output",
+      "safety_level_promotion"
+    ],
+    "forbidden_by_default": [
+      "arm_motion",
+      "audio_output",
+      "carry",
+      "grasp",
+      "hand_motion",
+      "hand_over",
+      "move",
+      "navigate",
+      "open_door",
+      "pick",
+      "place",
+      "turn",
+      "walk",
+      "whole_body_motion"
+    ],
+    "build_is_offline": true,
+    "install_must_not_actuate": true
+  }
+}

@@ -1,0 +1,69 @@
+schema: embodiment_composition_policy/v1
+name: default_sensor_first_composition_policy
+version: 0.1.0
+
+# Never compose nodes that explicitly opt out.
+respect_standalone_only: true
+
+# Generated collaboration graphs are sensor-only by default.
+default_graph_safety_level: sensor_only
+
+# Node kinds/types that may collaborate as observation sources.
+observer_node_types:
+  - physical_robot
+  - sensor
+  - camera
+  - microphone
+
+# Capabilities considered safe for automatic graph generation.
+safe_collaboration_capabilities:
+  - observe
+  - inspect
+  - perceive
+  - listen
+  - health_check
+
+# Actions never allowed in auto-generated graphs.
+forbidden_actions:
+  - navigate
+  - walk
+  - move
+  - turn
+  - grasp
+  - pick
+  - place
+  - carry
+  - hand_over
+  - open_door
+  - whole_body_motion
+  - arm_motion
+  - hand_motion
+  - audio_output
+
+# Graph templates the composer may generate.
+graph_templates:
+  dual_view_observation:
+    enabled: true
+    min_observers: 2
+    max_observers: 2
+    required_capability_any:
+      - observe
+      - inspect
+    output_capabilities:
+      - multi_view_perception
+      - sensor_fusion
+  observer_support:
+    enabled: true
+    min_observers: 1
+    max_observers: 3
+    required_capability_any:
+      - observe
+      - inspect
+      - listen
+    output_capabilities:
+      - observation_support
+
+# Package naming.
+naming:
+  instance_suffix: instance
+  graph_suffix: graph

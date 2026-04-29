@@ -1,0 +1,14 @@
+{
+  "schema": "embodiment_evidence/v1",
+  "package_id": "usb_1080p_camera",
+  "captured_at": "2026-04-28",
+  "host": "local_dev_host",
+  "verified": [
+    {"check": "video_device_present", "result": "ok", "note": "/dev/video0 (and /dev/video1) present, card 2: 1080P USB Camera"},
+    {"check": "single_frame_capture", "result": "ok", "note": "frame written to hub/static/frames/usb_camera.jpg"},
+    {"check": "audio_capture_2s", "result": "ok", "note": "non-zero RMS observed on plughw:2,0 at 16 kHz"}
+  ],
+  "session_constraints": {
+    "audio_output_allowed": false
+  }
+}

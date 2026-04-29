@@ -1,0 +1,61 @@
+schema: embodiment_composition_policy/v2
+name: default_sensor_only_policy
+version: 0.2.0
+
+# Never compose nodes that explicitly opt out.
+respect_standalone_only: true
+
+# Generated context packages are sensor-only by default.
+default_graph_safety_level: sensor_only
+
+# Node types that may be considered for inclusion.
+observer_node_types:
+  - physical_robot
+  - sensor
+  - camera
+  - microphone
+
+# Capabilities considered safe for automatic graph generation.
+safe_collaboration_capabilities:
+  - observe
+  - inspect
+  - perceive
+  - listen
+  - health_check
+
+# Actions never allowed in auto-generated graphs.
+forbidden_actions:
+  - navigate
+  - walk
+  - move
+  - turn
+  - grasp
+  - pick
+  - place
+  - carry
+  - hand_over
+  - open_door
+  - whole_body_motion
+  - arm_motion
+  - hand_motion
+  - audio_output
+
+# Graph emission rules. Each emission is conditional on detected nodes.
+graph_emission:
+  sensor_only_multiview_observation:
+    enabled: true
+    requires_min_observers: 2
+  single_view_fallback_observation:
+    enabled: true
+    requires_min_observers: 1
+  audio_readiness_check:
+    enabled: true
+    requires_min_audio_listeners: 1
+
+# LLM constraints (only applied in --mode llm-assisted).
+llm_constraints:
+  must_keep_section_headings: true
+  must_keep_all_forbidden_actions: true
+  must_not_promote_sensor_only: true
+  must_not_invent_capabilities: true
+  must_not_claim_unverified_evidence: true

@@ -1,0 +1,128 @@
+schema: embodiment_safety_policy/v2
+name: default_safety_policy
+version: 0.3.0
+
+# ── Capability class mapping ─────────────────────────────────────────────────
+# Every known action ID maps to a class. Unknown actions default to 'unknown'
+# which the validator treats as requiring confirmation.
+capability_classes:
+  # ── safe ── agent plans freely; runtime executes without additional prompt
+  perceive:     safe
+  observe:      safe
+  inspect:      safe
+  listen:       safe
+  health_check: safe
+  wait:         safe
+  standby:      safe
+
+  # ── motion ── locomotion; requires explicit user confirmation per task
+  walk:               motion
+  turn:               motion
+  navigate:           motion
+  move:               motion
+  whole_body_motion:  motion
+  follow:             motion
+  patrol:             motion
+
+  # ── manipulation ── object interaction; requires confirmation AND supervisor
+  reach:       manipulation
+  grasp:       manipulation
+  pick:        manipulation
+  place:       manipulation
+  carry:       manipulation
+  hand_over:   manipulation
+  open_door:   manipulation
+  arm_motion:  manipulation
+  hand_motion: manipulation
+  push:        manipulation
+  pull:        manipulation
+
+  # ── audio_output ── sound production; requires explicit confirmation
+  audio_output: audio_output
+  speak:        audio_output
+  play_sound:   audio_output
+
+# ── Safety class semantics ────────────────────────────────────────────────────
+safety_class_semantics:
+  safe:
+    description: Agent plans freely; runtime executes without additional prompt.
+    agent_rule: Plan and execute immediately.
+  motion:
+    description: Locomotion. Robot body moves through space.
+    agent_rule: Confirm with the user in the same conversation before planning. State which direction, distance, speed. Abort if confirmation is absent.
+    readiness_required:
+      - obstacle_check
+      - floor_clear
+      - user_confirmation_in_scope
+  manipulation:
+    description: Robot interacts with objects. Risk of damage to robot, object, or bystanders.
+    agent_rule: Require explicit user confirmation AND a supervisor signoff (a separate operator channel or a second explicit prompt). Never act on implied intent.
+    readiness_required:
+      - object_identified
+      - grasp_plan_verified
+      - user_confirmation_in_scope
+      - supervisor_signoff
+  audio_output:
+    description: Robot produces audible sound. Must respect quiet hours and local policy.
+    agent_rule: Confirm with the user. State what will be said/played. Do not produce unexpected sound.
+    readiness_required:
+      - user_confirmation_in_scope
+
+# ── Safety profiles ──────────────────────────────────────────────────────────
+# A profile gates the full capability set. The agent reads the active profile
+# from EMBODIMENT.md and uses it to decide what it can plan immediately vs.
+# what requires confirmation vs. what is completely forbidden.
+safety_profiles:
+  sensor_only:
+    description: >
+      Capture-only mode. Only safe-class actions. Locomotion, manipulation, and
+      audio output are forbidden. Use for first-time onboarding, read-only
+      inspection, and any session where the robot must not move.
+    allowed_classes:   [safe]
+    forbidden_classes: [motion, manipulation, audio_output]
+
+  observe_and_listen:
+    description: >
+      Same as sensor_only, but explicitly includes microphone/audio-capture
+      readiness checks (listen is a safe-class action, so this is equivalent).
+    allowed_classes:   [safe]
+    forbidden_classes: [motion, manipulation, audio_output]
+
+  motion_supervised:
+    description: >
+      Locomotion enabled with per-command user confirmation. Manipulation still
+      requires a supervisor. Audio output requires confirmation.
+    allowed_classes:         [safe]
+    confirmation_classes:    [motion, audio_output]
+    forbidden_classes:       [manipulation]
+
+  full_humanoid:
+    description: >
+      Full humanoid capability. Motion requires confirmation. Manipulation
+      requires confirmation plus supervisor signoff. Audio output requires
+      confirmation. Nothing is absolutely forbidden at the framework level;
+      task-level readiness checks govern execution.
+    allowed_classes:         [safe]
+    confirmation_classes:    [motion, audio_output]
+    supervisor_classes:      [manipulation]
+    forbidden_classes:       []
+
+# ── Default ───────────────────────────────────────────────────────────────────
+# The composer uses this profile when the user has not requested a specific one.
+# Still safe by default; user can override via --safety-profile or at prompt time.
+default_safety_profile: sensor_only
+
+# ── Composer filter ───────────────────────────────────────────────────────────
+respect_standalone_only: true
+observer_node_types:
+  - physical_robot
+  - sensor
+  - camera
+  - microphone
+
+safe_collaboration_capabilities:
+  - observe
+  - inspect
+  - perceive
+  - listen
+  - health_check

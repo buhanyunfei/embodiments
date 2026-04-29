@@ -1,0 +1,109 @@
+schema: embodiment_package/v1
+package_id: usb_1080p_camera
+name: 1080P USB Camera Embodiment
+version: 0.2.0
+kind: sensor
+license: Apache-2.0
+summary: Sensor embodiment package for a generic 1080P USB camera with optional microphone.
+maintainers:
+  - name: Auwomo PhysClaw Runtime
+tags:
+  - camera
+  - usb
+  - sensor
+  - microphone
+primary_agent_doc: EMBODIMENT.md
+models:
+  - model_id: generic_1080p_usb_camera
+    display_name: 1080P USB Camera
+    embodiment: usb_camera
+    default_safety_level: sensor_only
+    default_capabilities:
+      - discover
+      - health_check
+      - perceive
+      - observe
+      - inspect
+      - listen
+    sensors:
+      - rgb_camera
+      - microphone
+    forbidden_by_default:
+      - navigate
+      - walk
+      - move
+      - turn
+      - grasp
+      - pick
+      - place
+      - carry
+      - hand_over
+      - open_door
+      - whole_body_motion
+      - arm_motion
+      - hand_motion
+      - audio_output
+adapters:
+  - adapter_id: usb_camera_frame_adapter
+    type: local_device
+    contract: embodiment_endpoint_contract/v0.1
+    entrypoint: adapters/usb_camera_adapter.py
+    supports:
+      - health
+      - sensors
+      - sense_capture
+      - audio_record
+probes:
+  passive: probes/passive_probe.py
+  sensor: probes/sensor_probe.py
+registry:
+  schema: embodiment_node_registry/v1
+  nodes:
+    - id: usb_camera_real
+      name: External USB Camera
+      node_type: sensor
+      role: external_view
+      safe_capabilities:
+        - observe
+        - perceive
+      sensors:
+        - rgb_camera
+      limits:
+        sensor_only: true
+      standalone_only: false
+      endpoint_configured: false
+    - id: usb_mic_real
+      name: External USB Microphone
+      node_type: sensor
+      role: audio_input
+      safe_capabilities:
+        - listen
+      sensors:
+        - microphone
+      limits:
+        sensor_only: true
+      standalone_only: false
+      endpoint_configured: false
+safety:
+  default_policy: sensor_only
+  install_must_not_actuate: true
+  requires_confirmation_for:
+    - audio_output
+  forbidden_actions:
+    - navigate
+    - walk
+    - move
+    - turn
+    - grasp
+    - pick
+    - place
+    - carry
+    - hand_over
+    - open_door
+    - whole_body_motion
+    - arm_motion
+    - hand_motion
+    - audio_output
+compatibility:
+  runtime: auwomo_physclaw>=0.3
+  python: '>=3.9'

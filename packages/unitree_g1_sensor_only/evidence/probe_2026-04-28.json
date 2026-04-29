@@ -1,0 +1,23 @@
+{
+  "schema": "embodiment_evidence/v1",
+  "package_id": "unitree_g1_sensor_only",
+  "captured_at": "2026-04-28",
+  "host": "eai-ubuntu-2204",
+  "arch": "aarch64",
+  "verified": [
+    {"check": "g1_ctrl_network_reachable", "result": "ok", "note": "ping 192.168.123.161 succeeded"},
+    {"check": "g1_dev_network_reachable", "result": "ok", "note": "ping 192.168.123.164 succeeded"},
+    {"check": "ssh_passive_query", "result": "ok", "note": "host eai-ubuntu-2204, arch aarch64"},
+    {"check": "realsense_enumerated", "result": "ok", "note": "rs-enumerate-devices reported D435I serial 233722071669 firmware 5.16.0.1"},
+    {"check": "video_devices_present", "result": "ok", "note": "/dev/video0 .. /dev/video5 present"},
+    {"check": "realsense_color_frame_captured", "result": "ok", "note": "one frame captured without motion to hub/static/frames/g1_realsense_color.jpg"}
+  ],
+  "unverified": [
+    {"check": "g1_microphone_pickup", "result": "rms_zero", "note": "default arecord produced WAV with RMS=0; pickup route not verified"}
+  ],
+  "session_constraints": {
+    "movement_allowed": false,
+    "manipulation_allowed": false,
+    "audio_output_allowed": false
+  }
+}

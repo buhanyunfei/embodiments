@@ -1,0 +1,347 @@
+{
+  "schema": "embodiment_manifest/v1",
+  "built_at": 1777473129.5542948,
+  "package": {
+    "schema": "embodiment_package/v2",
+    "package_id": "unitree_g1",
+    "name": "Unitree G1 Humanoid",
+    "version": "0.3.0",
+    "kind": "robot",
+    "license": "Apache-2.0",
+    "summary": "Full-capability embodiment package for the Unitree G1 humanoid robot. Describes the complete action space (locomotion, manipulation, sensing, audio) with per-action safety classification. Active safety profile gates what the agent may plan.\n",
+    "maintainers": [
+      {
+        "name": "Auwomo PhysClaw Runtime"
+      }
+    ],
+    "tags": [
+      "unitree",
+      "g1",
+      "humanoid",
+      "realsense",
+      "full-capability"
+    ],
+    "primary_agent_doc": "EMBODIMENT.md",
+    "capabilities": [
+      {
+        "id": "perceive",
+        "class": "safe",
+        "verified": "passive_probe"
+      },
+      {
+        "id": "observe",
+        "class": "safe",
+        "verified": "realsense_d435i_color_capture"
+      },
+      {
+        "id": "inspect",
+        "class": "safe",
+        "verified": "passive_probe"
+      },
+      {
+        "id": "listen",
+        "class": "safe",
+        "verified": "partial",
+        "note": "Default arecord WAV had RMS=0; microphone route still needs verification."
+      },
+      {
+        "id": "health_check",
+        "class": "safe",
+        "verified": "passive_probe"
+      },
+      {
+        "id": "wait",
+        "class": "safe",
+        "verified": "always"
+      },
+      {
+        "id": "standby",
+        "class": "safe",
+        "verified": "always"
+      },
+      {
+        "id": "walk",
+        "class": "motion",
+        "verified": "vendor_capability",
+        "note": "Locomotion available. Not yet runtime-verified in this deployment."
+      },
+      {
+        "id": "turn",
+        "class": "motion",
+        "verified": "vendor_capability"
+      },
+      {
+        "id": "navigate",
+        "class": "motion",
+        "verified": "vendor_capability"
+      },
+      {
+        "id": "move",
+        "class": "motion",
+        "verified": "vendor_capability"
+      },
+      {
+        "id": "whole_body_motion",
+        "class": "motion",
+        "verified": "vendor_capability"
+      },
+      {
+        "id": "follow",
+        "class": "motion",
+        "verified": "vendor_capability"
+      },
+      {
+        "id": "reach",
+        "class": "manipulation",
+        "verified": "vendor_capability"
+      },
+      {
+        "id": "grasp",
+        "class": "manipulation",
+        "verified": "vendor_capability"
+      },
+      {
+        "id": "pick",
+        "class": "manipulation",
+        "verified": "vendor_capability"
+      },
+      {
+        "id": "place",
+        "class": "manipulation",
+        "verified": "vendor_capability"
+      },
+      {
+        "id": "carry",
+        "class": "manipulation",
+        "verified": "vendor_capability"
+      },
+      {
+        "id": "hand_over",
+        "class": "manipulation",
+        "verified": "vendor_capability"
+      },
+      {
+        "id": "open_door",
+        "class": "manipulation",
+        "verified": "vendor_capability"
+      },
+      {
+        "id": "arm_motion",
+        "class": "manipulation",
+        "verified": "vendor_capability"
+      },
+      {
+        "id": "hand_motion",
+        "class": "manipulation",
+        "verified": "vendor_capability"
+      },
+      {
+        "id": "audio_output",
+        "class": "audio_output",
+        "verified": "vendor_capability",
+        "note": "TTS / speaker available. Not yet runtime-tested for audio quality."
+      }
+    ],
+    "safety_profiles": {
+      "sensor_only": {
+        "description": "Sensors only. Motion + manipulation + audio_output forbidden.",
+        "allowed_classes": [
+          "safe"
+        ],
+        "forbidden_classes": [
+          "motion",
+          "manipulation",
+          "audio_output"
+        ]
+      },
+      "motion_supervised": {
+        "description": "Locomotion with per-command user confirmation. Manipulation still requires supervisor.",
+        "allowed_classes": [
+          "safe"
+        ],
+        "confirmation_classes": [
+          "motion",
+          "audio_output"
+        ],
+        "forbidden_classes": [
+          "manipulation"
+        ]
+      },
+      "full_humanoid": {
+        "description": "All capabilities accessible. Motion requires confirmation. Manipulation requires confirmation + supervisor signoff.\n",
+        "allowed_classes": [
+          "safe"
+        ],
+        "confirmation_classes": [
+          "motion",
+          "audio_output"
+        ],
+        "supervisor_classes": [
+          "manipulation"
+        ],
+        "forbidden_classes": []
+      }
+    },
+    "default_safety_profile": "sensor_only",
+    "registry": {
+      "schema": "embodiment_node_registry/v1",
+      "nodes": [
+        {
+          "id": "g1_real_sensor_only",
+          "name": "G1 Sensor-Only Observer",
+          "node_type": "physical_robot",
+          "role": "robot_local_view",
+          "all_capabilities": [
+            "perceive",
+            "observe",
+            "inspect",
+            "listen",
+            "health_check",
+            "wait",
+            "standby",
+            "walk",
+            "turn",
+            "navigate",
+            "reach",
+            "grasp",
+            "pick",
+            "place",
+            "carry",
+            "hand_over",
+            "arm_motion",
+            "hand_motion",
+            "whole_body_motion",
+            "audio_output"
+          ],
+          "safe_capabilities": [
+            "perceive",
+            "observe",
+            "inspect",
+            "listen",
+            "health_check",
+            "wait",
+            "standby"
+          ],
+          "sensors": [
+            "realsense_color_camera",
+            "realsense_depth_camera",
+            "onboard_audio_capture",
+            "lowstate_readonly",
+            "imu"
+          ],
+          "limits": {
+            "g1_ctrl_ip": "192.168.123.161",
+            "g1_dev_ip": "192.168.123.164",
+            "host": "eai-ubuntu-2204",
+            "arch": "aarch64"
+          },
+          "standalone_only": false,
+          "endpoint_configured": false
+        },
+        {
+          "id": "g1_realsense_color_sensor",
+          "name": "G1 RealSense Color Sensor",
+          "node_type": "sensor",
+          "role": "robot_local_view",
+          "all_capabilities": [
+            "observe",
+            "perceive"
+          ],
+          "safe_capabilities": [
+            "observe",
+            "perceive"
+          ],
+          "sensors": [
+            "rgb_camera"
+          ],
+          "limits": {
+            "serial": "233722071669",
+            "firmware": "5.16.0.1",
+            "device_paths": "/dev/video0 .. /dev/video5"
+          },
+          "standalone_only": false,
+          "endpoint_configured": false,
+          "parent_robot": "g1_real_sensor_only"
+        }
+      ]
+    },
+    "adapters": [
+      {
+        "adapter_id": "g1_http",
+        "type": "http",
+        "contract": "embodiment_endpoint_contract/v0.1",
+        "entrypoint": "adapters/g1_adapter.py",
+        "supports": [
+          "health",
+          "state",
+          "sensors",
+          "sense_capture",
+          "audio_record",
+          "motion_command"
+        ]
+      }
+    ],
+    "probes": {
+      "passive": "probes/passive_probe.py",
+      "sensor": "probes/sensor_probe.py"
+    },
+    "safety": {
+      "default_policy": "sensor_only",
+      "install_must_not_actuate": true,
+      "requires_confirmation_for": [
+        "any_motion",
+        "any_manipulation",
+        "audio_output"
+      ],
+      "forbidden_actions": []
+    },
+    "compatibility": {
+      "runtime": "auwomo_physclaw>=0.3",
+      "python": ">=3.9"
+    }
+  },
+  "package_dir": "embodiments/packages/unitree_g1",
+  "files": [
+    {
+      "path": "EMBODIMENT.md",
+      "sha256": "aebfbe60d5fbf52a1e133eba5dde78e6d82dda505d39846198fafedbe038a917",
+      "bytes": 8730
+    },
+    {
+      "path": "adapters/README.md",
+      "sha256": "7c98972fde2aa6383a4a8c5d24cae0d602878c96ae2a5c29ba364af65699f5fe",
+      "bytes": 265
+    },
+    {
+      "path": "embodiment.yaml",
+      "sha256": "885e6b19c75cb7f5d97571eb9678021a611dce676a6446994bb4eab181cdb092",
+      "bytes": 6243
+    },
+    {
+      "path": "evidence/probe_2026-04-28.json",
+      "sha256": "e3fac3246a70a365c496c2c1c6d24912ec47876accff588cda0a7e91c6adfad8",
+      "bytes": 1174
+    },
+    {
+      "path": "probes/passive_probe.py",
+      "sha256": "fcefff1f02d98d6aa8fbe546b8b28d2278a4d94cffc54681e5b393ee723bc0da",
+      "bytes": 234
+    },
+    {
+      "path": "probes/sensor_probe.py",
+      "sha256": "55f2c456afb386a7272dd574ca70abf4a76db05bf6fb192e4385c7ae461acb24",
+      "bytes": 247
+    }
+  ],
+  "safety_summary": {
+    "default_policy": "sensor_only",
+    "requires_confirmation_for": [
+      "any_motion",
+      "any_manipulation",
+      "audio_output"
+    ],
+    "forbidden_by_default": [],
+    "build_is_offline": true,
+    "install_must_not_actuate": true
+  }
+}

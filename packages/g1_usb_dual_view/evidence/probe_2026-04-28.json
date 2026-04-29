@@ -1,0 +1,15 @@
+{
+  "schema": "embodiment_evidence/v1",
+  "package_id": "g1_usb_dual_view",
+  "captured_at": "2026-04-28",
+  "verified": [
+    {"check": "g1_realsense_color_frame", "result": "ok", "note": "G1 RealSense color frame captured to hub/static/frames/g1_realsense_color.jpg"},
+    {"check": "usb_camera_frame", "result": "ok", "note": "External USB camera frame captured to hub/static/frames/usb_camera.jpg"},
+    {"check": "vlm_dual_view_describe", "result": "ok", "note": "Prior VLM run produced a dual-view scene description in runtime trace"}
+  ],
+  "session_constraints": {
+    "movement_allowed": false,
+    "manipulation_allowed": false,
+    "audio_output_allowed": false
+  }
+}

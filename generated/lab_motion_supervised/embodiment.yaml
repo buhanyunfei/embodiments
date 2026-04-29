@@ -1,0 +1,266 @@
+schema: embodiment_package/v2
+package_id: lab_motion_supervised
+name: Lab Motion Supervised
+version: 0.3.0
+kind: embodiment_context
+license: Apache-2.0
+summary: 'Embodiment context. Active safety profile: motion_supervised.'
+primary_agent_doc: EMBODIMENT.md
+active_safety_profile: motion_supervised
+registry:
+  schema: embodiment_node_registry/v1
+  nodes:
+  - id: camera_usb_real
+    name: USB Camera Sensor
+    node_type: sensor
+    role: external_view
+    all_capabilities:
+    - perceive
+    - capture_frame
+    - vision
+    safe_capabilities:
+    - perceive
+    sensors: []
+    limits: {}
+    standalone_only: false
+    endpoint_configured: false
+    real_device: true
+    parent_robot: null
+  - id: g1_real_sensor_only
+    name: G1 Sensor-Only Observer
+    node_type: physical_robot
+    role: robot_local_view
+    all_capabilities:
+    - perceive
+    - observe
+    - inspect
+    - listen
+    - wait
+    - standby
+    safe_capabilities:
+    - inspect
+    - listen
+    - observe
+    - perceive
+    sensors:
+    - realsense_color_camera
+    - realsense_depth_camera
+    - onboard_audio_capture
+    - lowstate_readonly
+    limits:
+      movement_allowed: false
+      manipulation_allowed: false
+      sensor_only: true
+      g1_ctrl_ip: 192.168.123.161
+      g1_dev_ip: 192.168.123.164
+    standalone_only: false
+    endpoint_configured: false
+    real_device: false
+    parent_robot: null
+  - id: g1_realsense_color_sensor
+    name: G1 RealSense Color Sensor
+    node_type: sensor
+    role: robot_local_view
+    all_capabilities:
+    - perceive
+    - observe
+    - capture_frame
+    - vision
+    safe_capabilities:
+    - observe
+    - perceive
+    sensors: []
+    limits: {}
+    standalone_only: false
+    endpoint_configured: false
+    real_device: true
+    parent_robot: g1_real_sensor_only
+  - id: usb_camera_real
+    name: External USB Camera
+    node_type: sensor
+    role: external_view
+    all_capabilities:
+    - perceive
+    - observe
+    - capture_frame
+    - vision
+    safe_capabilities:
+    - observe
+    - perceive
+    sensors: []
+    limits: {}
+    standalone_only: false
+    endpoint_configured: false
+    real_device: true
+    parent_robot: null
+  - id: usb_mic_real
+    name: External USB Microphone
+    node_type: sensor
+    role: audio_input
+    all_capabilities:
+    - listen
+    - audio_capture
+    - voice_input
+    safe_capabilities:
+    - listen
+    sensors: []
+    limits: {}
+    standalone_only: false
+    endpoint_configured: false
+    real_device: true
+    parent_robot: null
+graphs:
+- schema: embodiment_graph/v2
+  graph_id: observation
+  name: Observation Graph (motion_supervised profile)
+  intent: Observe and describe the environment using available sensors and actuators,
+    within the active safety profile.
+  safety_level: motion_supervised
+  active_safety_profile: motion_supervised
+  roles:
+  - role_id: robot_local_view
+    description: Ego/first-person view from a robot-mounted sensor.
+    required_capabilities:
+    - observe
+    preferred_nodes:
+    - g1_real_sensor_only
+    - g1_realsense_color_sensor
+    minimum: 0
+    maximum: 9999
+  - role_id: external_view
+    description: Third-person view from an external camera.
+    required_capabilities:
+    - observe
+    preferred_nodes:
+    - camera_usb_real
+    - usb_camera_real
+    minimum: 0
+    maximum: 9999
+  - role_id: audio_input
+    description: Microphone for audio capture (capture only, never output).
+    required_capabilities:
+    - listen
+    preferred_nodes:
+    - g1_real_sensor_only
+    - usb_mic_real
+    minimum: 0
+    maximum: 9999
+  - role_id: perception_model
+    description: Runtime-provided VLM/perception model.
+    required_capabilities:
+    - image_understanding
+    minimum: 1
+    maximum: 1
+  nodes:
+  - id: camera_usb_real
+    role: external_view
+    node_type: sensor
+    required_capabilities:
+    - observe
+  - id: g1_real_sensor_only
+    role: robot_local_view
+    node_type: physical_robot
+    required_capabilities:
+    - observe
+  - id: g1_realsense_color_sensor
+    role: robot_local_view
+    node_type: sensor
+    required_capabilities:
+    - observe
+  - id: usb_camera_real
+    role: external_view
+    node_type: sensor
+    required_capabilities:
+    - observe
+  - id: usb_mic_real
+    role: audio_input
+    node_type: sensor
+    required_capabilities:
+    - listen
+  - id: perception_vision
+    role: perception_model
+    node_type: perception_model
+    required_capabilities:
+    - image_understanding
+  edges:
+  - source: camera_usb_real
+    target: perception_vision
+    edge_type: observation_stream
+  - source: g1_real_sensor_only
+    target: perception_vision
+    edge_type: observation_stream
+  - source: g1_realsense_color_sensor
+    target: perception_vision
+    edge_type: observation_stream
+  - source: usb_camera_real
+    target: perception_vision
+    edge_type: observation_stream
+  constraints:
+    allow_motion: true
+    allow_manipulation: false
+    allow_audio_output: true
+    forbidden_actions: &id001 []
+  readiness_checks:
+  - all_required_nodes_exist
+  - required_capabilities_are_safe
+  - sensor_artifacts_available_or_capture_allowed
+  - no_forbidden_action_in_task
+  - user_confirmed_motion_in_scope
+  - audio_rms_non_zero_or_explicitly_unverified
+  failure_modes:
+  - id: node_missing
+    when: required node id not in topology
+    attribution: topology
+  - id: node_offline
+    when: adapter/endpoint unreachable
+    attribution: hardware
+  - id: capability_missing
+    when: node lacks a required capability
+    attribution: configuration
+  - id: forbidden_action_requested
+    when: task action is in forbidden_actions for active profile
+    attribution: planner
+  - id: sensor_artifact_missing
+    when: frame/audio file not produced
+    attribution: sensor
+  - id: missing_confirmation
+    when: motion/manipulation planned without prior user confirmation
+    attribution: planner
+  - id: unverified_audio_pickup
+    when: audio captured but RMS=0 or speech absent
+    attribution: sensor
+  recovery:
+    auto_allowed:
+    - retry_passive_health_check
+    - choose_alternate_observer
+    - downgrade_multiview_to_single_view
+    requires_confirmation:
+    - audio_output
+    - motion
+    not_recoverable:
+    - missing_capable_executor
+  outputs:
+  - scene_description
+  - motion_trace
+  - audio_pickup_status
+  - sensor_readiness_report
+  - failure_attribution
+  - episode_trace
+safety:
+  active_safety_profile: motion_supervised
+  default_policy: sensor_only
+  install_must_not_actuate: true
+  requires_confirmation_for:
+  - audio_output
+  - motion
+  forbidden_actions: *id001
+integration:
+  exposes_agent_context: true
+  compatible_with:
+  - auwomo_physclaw
+  - openclaw_like_runtime
+generated:
+  by: embodiment_context_composer
+  at: 1777473129.691213
+  safety_profile_used: motion_supervised
+  skipped_standalone_nodes: []

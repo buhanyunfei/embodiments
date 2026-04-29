@@ -1,0 +1,131 @@
+schema: embodiment_package/v2
+package_id: example_context
+name: Example Sensor-only Context
+version: 0.1.0
+kind: embodiment_context
+license: Apache-2.0
+summary: Replace this with a one-sentence description of the deployment.
+primary_agent_doc: EMBODIMENT.md
+
+# Inline registry. No separate registry/nodes.yaml needed.
+registry:
+  schema: embodiment_node_registry/v1
+  nodes:
+    - id: example_camera
+      name: Example Camera
+      node_type: sensor
+      role: external_view
+      safe_capabilities: [observe, perceive]
+      sensors: [rgb_camera]
+      limits: {sensor_only: true}
+      standalone_only: false
+      endpoint_configured: false
+
+# Inline primary graph. Emit only one. Fallbacks live in `recovery.auto_allowed`.
+graphs:
+  - schema: embodiment_graph/v2
+    graph_id: sensor_only_observation
+    name: Sensor-only Observation
+    intent: Describe the workspace using example_camera, without moving any robot.
+    safety_level: sensor_only
+    roles:
+      - role_id: external_view
+        description: Third-person view from a fixed camera.
+        required_capabilities: [observe]
+        preferred_nodes: [example_camera]
+        minimum: 1
+        maximum: 9999
+      - role_id: perception_model
+        description: Runtime-provided perception model.
+        required_capabilities: [image_understanding]
+        minimum: 1
+        maximum: 1
+    nodes:
+      - id: example_camera
+        role: external_view
+        node_type: sensor
+        required_capabilities: [observe]
+      - id: perception_vision
+        role: perception_model
+        node_type: perception_model
+        required_capabilities: [image_understanding]
+    edges:
+      - source: example_camera
+        target: perception_vision
+        edge_type: observation_stream
+    constraints:
+      allow_motion: false
+      allow_manipulation: false
+      allow_audio_output: false
+      forbidden_actions:
+        - navigate
+        - walk
+        - move
+        - turn
+        - grasp
+        - pick
+        - place
+        - carry
+        - hand_over
+        - open_door
+        - whole_body_motion
+        - arm_motion
+        - hand_motion
+        - audio_output
+    readiness_checks:
+      - all_required_nodes_exist
+      - required_capabilities_are_safe
+      - sensor_artifacts_available_or_capture_allowed
+      - no_forbidden_action_in_task
+    failure_modes:
+      - id: node_missing
+        when: required node id is not in topology
+        attribution: topology
+      - id: forbidden_action_requested
+        when: task asks for an action listed in constraints.forbidden_actions
+        attribution: planner
+    recovery:
+      auto_allowed:
+        - retry_passive_health_check
+        - choose_alternate_observer
+      requires_confirmation:
+        - any_motion
+        - any_manipulation
+        - audio_output
+      not_recoverable:
+        - missing_capable_executor
+    outputs:
+      - scene_description
+      - sensor_readiness_report
+      - failure_attribution
+      - episode_trace
+
+safety:
+  default_policy: sensor_only
+  install_must_not_actuate: true
+  requires_confirmation_for:
+    - any_motion
+    - any_manipulation
+    - audio_output
+    - safety_level_promotion
+  forbidden_actions:
+    - navigate
+    - walk
+    - move
+    - turn
+    - grasp
+    - pick
+    - place
+    - carry
+    - hand_over
+    - open_door
+    - whole_body_motion
+    - arm_motion
+    - hand_motion
+    - audio_output
+
+integration:
+  exposes_agent_context: true
+  compatible_with:
+    - auwomo_physclaw
+    - openclaw_like_runtime
