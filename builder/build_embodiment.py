@@ -41,7 +41,9 @@ except Exception:
 
 VALID_KINDS = {"robot", "sensor", "actuator", "hardware_rig",
                "embodiment_graph", "collaboration", "embodiment_context"}
-VALID_SCHEMAS = {"embodiment_package/v1", "embodiment_package/v2"}
+VALID_SCHEMAS = {"embodiment_package/v1", "embodiment_package/v2", "embodiment_package/v3"}
+VALID_GRAPH_SCHEMAS = {"embodiment_graph/v1", "embodiment_graph/v2", "embodiment_graph/v3"}
+VALID_REGISTRY_SCHEMAS = {"embodiment_node_registry/v1", "embodiment_node_registry/v2"}
 REQUIRED_TOP_LEVEL = ["schema", "package_id", "name", "version", "kind", "license", "summary"]
 
 DEFAULT_FORBIDDEN = {
@@ -63,6 +65,13 @@ EMBODIMENT_MD_SECTIONS = [
     "Failure modes",
     "Recovery",
     "Runtime integration",
+]
+
+# Additional sections required for v3 context packages
+EMBODIMENT_MD_SECTIONS_V3 = EMBODIMENT_MD_SECTIONS + [
+    "Tool interfaces",
+    "Execution workflows",
+    "Cooperation boundaries",
 ]
 
 # Packages using the capability-class model may leave forbidden_actions empty in the
@@ -125,13 +134,11 @@ def _resolve_graphs(package_dir: Path, data: Dict[str, Any]) -> List[Dict[str, A
     if isinstance(graphs_field, list):
         for entry in graphs_field:
             if isinstance(entry, dict):
-                # inline graph
                 out.append(entry)
             elif isinstance(entry, str):
                 g = _load_yaml_optional(package_dir / entry)
                 if g:
                     out.append(g)
-    # Conventional fallback: any *.yaml under graphs/
     graphs_dir = package_dir / "graphs"
     if graphs_dir.exists():
         for gpath in sorted(graphs_dir.glob("*.yaml")):
@@ -139,6 +146,14 @@ def _resolve_graphs(package_dir: Path, data: Dict[str, Any]) -> List[Dict[str, A
             if g and not any(g.get("graph_id") == ex.get("graph_id") for ex in out):
                 out.append(g)
     return out
+
+
+def _resolve_workflows(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return workflow index entries (lightweight alternative to full graphs)."""
+    wf = data.get("workflows")
+    if isinstance(wf, list):
+        return [w for w in wf if isinstance(w, dict)]
+    return []
 
 
 # --------------------------------------------------------------------------- #
@@ -226,8 +241,9 @@ def _validate_layout(package_dir: Path, data: Dict[str, Any]) -> Tuple[List[str]
         if not reg.get("nodes"):
             errors.append("kind=embodiment_context requires a non-empty registry (inline `registry: {nodes: [...]}` or registry/nodes.yaml)")
         graphs = _resolve_graphs(package_dir, data)
-        if not graphs:
-            errors.append("kind=embodiment_context requires at least one graph (inline in `graphs:` or under graphs/*.yaml)")
+        workflows = _resolve_workflows(data)
+        if not graphs and not workflows:
+            errors.append("kind=embodiment_context requires at least one graph (in `graphs:`) or workflow (in `workflows:`)")
     else:
         if not (package_dir / "EMBODIMENT.md").exists():
             warnings.append("EMBODIMENT.md not found; agent runtimes will have less context to plan with")
@@ -242,7 +258,9 @@ def _validate_embodiment_md(package_dir: Path, data: Dict[str, Any]) -> Tuple[Li
     warnings: List[str] = []
     text = md_path.read_text(encoding="utf-8")
     required_for_context = _is_context(data)
-    for sec in EMBODIMENT_MD_SECTIONS:
+    is_v3 = data.get("schema") == "embodiment_package/v3"
+    sections = EMBODIMENT_MD_SECTIONS_V3 if is_v3 else EMBODIMENT_MD_SECTIONS
+    for sec in sections:
         if sec not in text:
             msg = f"EMBODIMENT.md is missing section containing: '{sec}'"
             (errors if required_for_context else warnings).append(msg)
@@ -260,12 +278,14 @@ def _validate_registry(package_dir: Path, data: Dict[str, Any]) -> Tuple[List[st
         return [], []
     errors: List[str] = []
     warnings: List[str] = []
-    if reg.get("schema") and reg.get("schema") != "embodiment_node_registry/v1":
-        errors.append(f"registry has invalid schema: {reg.get('schema')}")
+    reg_schema = reg.get("schema", "")
+    if reg_schema and reg_schema not in VALID_REGISTRY_SCHEMAS:
+        errors.append(f"registry has invalid schema: {reg_schema}")
+    if reg_schema == "embodiment_node_registry/v1" and data.get("schema") == "embodiment_package/v3":
+        warnings.append("v3 package uses registry v1; consider upgrading to embodiment_node_registry/v2")
     forbidden = set((data.get("safety") or {}).get("forbidden_actions") or [])
     for n in reg.get("nodes") or []:
         nid = n.get("id") or "<unnamed>"
-        # Check safe_capabilities don't leak forbidden actions (if forbidden list non-empty)
         safe = set(n.get("safe_capabilities") or [])
         if forbidden:
             leaked = safe & forbidden
@@ -276,6 +296,18 @@ def _validate_registry(package_dir: Path, data: Dict[str, Any]) -> Tuple[List[st
             beyond = safe - SENSOR_ONLY_SAFE
             if beyond:
                 errors.append(f"registry node '{nid}' is sensor_only but lists non-safe capabilities: {sorted(beyond)}")
+        # v2 registry: validate agent_node requirements
+        if reg_schema == "embodiment_node_registry/v2":
+            participant_type = n.get("participant_type")
+            if participant_type == "agent_node" and not n.get("agent_subtype"):
+                errors.append(f"registry node '{nid}': participant_type=agent_node requires 'agent_subtype' field")
+            ti = n.get("tool_interface")
+            if ti:
+                if not ti.get("protocol"):
+                    errors.append(f"registry node '{nid}': tool_interface missing 'protocol'")
+                for op in ti.get("operations") or []:
+                    if not op.get("operation_id"):
+                        errors.append(f"registry node '{nid}': tool_interface operation missing 'operation_id'")
     return errors, warnings
 
 
@@ -288,17 +320,64 @@ def _validate_graphs(package_dir: Path, data: Dict[str, Any]) -> Tuple[List[str]
     for g in graphs:
         gid = g.get("graph_id") or "<unnamed>"
         schema = g.get("schema")
-        if schema not in {"embodiment_graph/v1", "embodiment_graph/v2"}:
+        if schema not in VALID_GRAPH_SCHEMAS:
             errors.append(f"graph '{gid}': invalid schema: {schema}")
             continue
-        if schema == "embodiment_graph/v2":
-            for k in ("name", "intent", "safety_level", "roles", "nodes", "constraints",
-                     "readiness_checks", "failure_modes", "recovery", "outputs"):
-                if not g.get(k):
-                    errors.append(f"graph '{gid}': missing required v2 key: '{k}'")
-            if (g.get("safety_level") == "sensor_only"
-                and not (g.get("constraints") or {}).get("forbidden_actions")):
-                errors.append(f"graph '{gid}': sensor_only graph requires non-empty constraints.forbidden_actions")
+        if schema == "embodiment_graph/v1":
+            warnings.append(f"graph '{gid}': using deprecated v1 schema")
+            continue
+        # Common v2/v3 validation
+        v2_keys = ("name", "intent", "safety_level", "roles", "nodes", "constraints",
+                   "readiness_checks", "failure_modes", "recovery", "outputs")
+        for k in v2_keys:
+            if not g.get(k):
+                errors.append(f"graph '{gid}': missing required key: '{k}'")
+        if (g.get("safety_level") == "sensor_only"
+            and not (g.get("constraints") or {}).get("forbidden_actions")):
+            errors.append(f"graph '{gid}': sensor_only graph requires non-empty constraints.forbidden_actions")
+        # v3-specific validation
+        if schema == "embodiment_graph/v3":
+            if not g.get("trigger_keywords"):
+                errors.append(f"graph '{gid}': v3 graph requires non-empty 'trigger_keywords'")
+            if not g.get("cooperation_network"):
+                errors.append(f"graph '{gid}': v3 graph requires 'cooperation_network'")
+            for edge in g.get("edges") or []:
+                if not edge.get("ordering"):
+                    errors.append(f"graph '{gid}': edge {edge.get('source')}→{edge.get('target')} missing 'ordering'")
+                if not edge.get("protocol_hint"):
+                    errors.append(f"graph '{gid}': edge {edge.get('source')}→{edge.get('target')} missing 'protocol_hint'")
+                if edge.get("ordering") == "conditional" and not edge.get("condition"):
+                    errors.append(f"graph '{gid}': conditional edge {edge.get('source')}→{edge.get('target')} missing 'condition'")
+            # Check at least one agent_node participant
+            has_agent = any(n.get("participant_type") == "agent_node" or n.get("agent_subtype")
+                          for n in g.get("nodes") or [])
+            if not has_agent:
+                warnings.append(f"graph '{gid}': v3 graph has no agent_node participant")
+        elif schema == "embodiment_graph/v2":
+            warnings.append(f"graph '{gid}': using v2 schema; consider upgrading to v3 for cooperation+execution support")
+    return errors, warnings
+
+
+def _validate_workflows(data: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    """Validate lightweight workflow index entries."""
+    workflows = _resolve_workflows(data)
+    if not workflows:
+        return [], []
+    errors: List[str] = []
+    warnings: List[str] = []
+    registry = data.get("registry") or {}
+    node_ids = {n.get("id") for n in registry.get("nodes") or []}
+    for wf in workflows:
+        wid = wf.get("id") or "<unnamed>"
+        if not wf.get("id"):
+            errors.append(f"workflow entry missing 'id'")
+        if not wf.get("trigger_keywords"):
+            errors.append(f"workflow '{wid}': missing 'trigger_keywords'")
+        if not wf.get("safety_level"):
+            warnings.append(f"workflow '{wid}': missing 'safety_level'")
+        for nid in wf.get("primary_nodes") or []:
+            if node_ids and nid not in node_ids:
+                errors.append(f"workflow '{wid}': primary_node '{nid}' not found in registry")
     return errors, warnings
 
 
@@ -323,6 +402,7 @@ def validate_package(package_dir: Path, strict: bool = False) -> Dict[str, Any]:
     e, w = _validate_embodiment_md(package_dir, data); errors += e; warnings += w
     e, w = _validate_registry(package_dir, data); errors += e; warnings += w
     e, w = _validate_graphs(package_dir, data); errors += e; warnings += w
+    e, w = _validate_workflows(data); errors += e; warnings += w
     if strict:
         errors += [f"warning_as_error: {w}" for w in warnings]
         warnings = []

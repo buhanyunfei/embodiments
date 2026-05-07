@@ -119,6 +119,7 @@ observer_node_types:
   - sensor
   - camera
   - microphone
+  - agent_node
 
 safe_collaboration_capabilities:
   - observe
@@ -126,3 +127,31 @@ safe_collaboration_capabilities:
   - perceive
   - listen
   - health_check
+  - plan
+  - approve
+  - supervise
+  - describe
+
+# ── Cooperation constraints ──────────────────────────────────────────────────
+# How cooperation network interacts with safety profiles.
+# Safety profile takes precedence: even if cooperation is approved,
+# forbidden-class actions are still blocked.
+cooperation_constraints:
+  # LLM agents and humans can cooperate with physical nodes by default
+  agent_to_physical_default: approved
+  # Two physical robots cooperating needs human review first
+  physical_to_physical_default: pending_human_review
+  # Human operator node is always approved to cooperate with anything
+  human_operator_overrides: always_approved
+
+  # Per safety profile, which edge types are allowed even with cooperation approved
+  profile_edge_restrictions:
+    sensor_only:
+      allowed_edge_types: [observation_stream, query, context_feed, feedback, memory]
+      blocked_edge_types: [command]
+    motion_supervised:
+      allowed_edge_types: [observation_stream, query, context_feed, feedback, memory, command, approval_request]
+      blocked_edge_types: []
+    full_humanoid:
+      allowed_edge_types: [observation_stream, query, context_feed, feedback, memory, command, approval_request]
+      blocked_edge_types: []

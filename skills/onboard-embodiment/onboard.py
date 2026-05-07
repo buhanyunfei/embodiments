@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""End-to-end onboarding orchestrator for embodiments.
+"""End-to-end onboarding orchestrator for embodiments (v3).
 
-This is a thin wrapper around three already-existing tools:
+This is a thin wrapper around four already-existing tools:
 
-  1. robot_node_onboarding.cli   - passive device discovery + profile card
-  2. embodiments/composer        - deployment-level context composition
+  1. robot_node_onboarding.cli   - passive device discovery + tool interface auto-discovery
+  2. embodiments/composer        - deployment-level context composition (v3: multi-graph, cooperation)
   3. embodiments/builder         - validate + zip
+  4. embodiments/runtime/loader  - hot-plug into running agent system
 
 It does not invent any new safety semantics. It just executes the SKILL.md
 workflow in order, stops at the first failure, and prints a structured summary
@@ -13,24 +14,29 @@ the agent can read.
 
 Usage:
 
-  # Onboard a new robot at a known IP and add it to the existing context.
-  python embodiments/skills/onboard-embodiment/onboard.py \\
-    --device-id g2_real_sensor_only \\
-    --device-kind robot \\
-    --ip 192.168.5.20 \\
+  # Onboard a new robot at a known IP and add it to the existing context (v3).
+  python embodiments/skills/onboard-embodiment/onboard.py \
+    --device-id g2_real_sensor_only \
+    --device-kind robot \
+    --ip 192.168.5.20 \
     --package-id current_lab_sensor_context
 
   # Onboard a USB camera and keep it standalone.
-  python embodiments/skills/onboard-embodiment/onboard.py \\
-    --device-id usb_camera_2 \\
-    --device-kind sensor \\
-    --usb \\
+  python embodiments/skills/onboard-embodiment/onboard.py \
+    --device-id usb_camera_2 \
+    --device-kind sensor \
+    --usb \
     --standalone
 
   # Re-compose only (skip device discovery; useful when topology already updated).
-  python embodiments/skills/onboard-embodiment/onboard.py \\
-    --skip-discover \\
+  python embodiments/skills/onboard-embodiment/onboard.py \
+    --skip-discover \
     --package-id current_lab_sensor_context
+
+  # Use v2 schema (backward compatible).
+  python embodiments/skills/onboard-embodiment/onboard.py \
+    --device-id usb_camera_3 \
+    --schema-version v2
 
 This script is sensor-only. It never sends motion commands.
 """
@@ -52,6 +58,7 @@ DEFAULT_TOPOLOGY = REPO_ROOT / "hub" / "topology_snapshot.json"
 DEFAULT_OUT = REPO_ROOT / "embodiments" / "generated"
 DEFAULT_DIST = REPO_ROOT / "embodiments" / "dist"
 DEFAULT_LLM_CONFIG = REPO_ROOT / "hub" / "copaw_config.json"
+DEFAULT_COOPERATION_POLICY = REPO_ROOT / "embodiments" / "policies" / "default_cooperation_policy.yaml"
 COMPOSER = REPO_ROOT / "embodiments" / "composer" / "compose_context.py"
 BUILDER = REPO_ROOT / "embodiments" / "builder" / "build_embodiment.py"
 
@@ -117,15 +124,34 @@ def discover(device_id: str, ip: Optional[str], http_base: Optional[str], usb: b
     return steps
 
 
+def discover_tools(device_id: str, ip: Optional[str], http_base: Optional[str]) -> Dict[str, Any]:
+    """Run tool interface auto-discovery for the device (v3)."""
+    cmd = [PYTHON, "-m", "robot_node_onboarding.cli", "discover-tools",
+           "--robot-id", device_id]
+    if ip:
+        cmd += ["--ip", ip]
+    if http_base:
+        cmd += ["--http-base", http_base]
+    return _run(cmd, step="onboard.discover_tools")
+
+
 def compose(topology: Path, package_id: str, out: Path,
             mode: str, llm_config: Path, standalone: List[str],
+            schema_version: str = "v3",
+            cooperation_policy: Optional[Path] = None,
+            include_agent_nodes: bool = True,
             title: Optional[str] = None) -> Dict[str, Any]:
     cmd = [PYTHON, str(COMPOSER), "generate",
            "--topology", str(topology),
            "--package-id", package_id,
            "--out", str(out),
            "--mode", mode,
-           "--llm-config", str(llm_config)]
+           "--llm-config", str(llm_config),
+           "--schema-version", schema_version]
+    if cooperation_policy and cooperation_policy.exists():
+        cmd += ["--cooperation-policy", str(cooperation_policy)]
+    if include_agent_nodes and schema_version == "v3":
+        cmd += ["--include-agent-nodes"]
     if title:
         cmd += ["--title", title]
     for s in standalone:
@@ -147,8 +173,47 @@ def build(package_dir: Path, out: Path, strict: bool = False) -> Dict[str, Any]:
     return _run(cmd, step="build")
 
 
+def hot_plug(zip_path: Path, config_path: Optional[Path] = None) -> Dict[str, Any]:
+    """Hot-plug the built package into the runtime loader."""
+    try:
+        sys.path.insert(0, str(REPO_ROOT))
+        from embodiments.runtime.loader import EmbodimentLoader
+
+        loader_config = str(config_path) if config_path else None
+        loader = EmbodimentLoader(config_path=loader_config)
+        loader.discover()
+        package_id = loader.hot_plug(str(zip_path))
+        if package_id:
+            status = loader.status()
+            return {
+                "step": "hot_plug",
+                "ok": True,
+                "package_id": package_id,
+                "active_packages": status["active"],
+                "total_tools": status["total_tools"],
+            }
+        return {
+            "step": "hot_plug",
+            "ok": False,
+            "error": f"hot_plug returned None for {zip_path}",
+        }
+    except ImportError as e:
+        return {
+            "step": "hot_plug",
+            "ok": False,
+            "error": f"runtime loader not available: {e}",
+            "hint": "Install embodiments.runtime or check sys.path",
+        }
+    except Exception as e:
+        return {
+            "step": "hot_plug",
+            "ok": False,
+            "error": str(e),
+        }
+
+
 def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="Onboard a new embodiment end-to-end.")
+    ap = argparse.ArgumentParser(description="Onboard a new embodiment end-to-end (v3).")
     ap.add_argument("--device-id", help="device slug, e.g. g2_real_sensor_only")
     ap.add_argument("--device-kind", choices=["robot", "sensor", "actuator", "hardware_rig"], default="sensor")
     ap.add_argument("--ip")
@@ -165,15 +230,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--dist", default=str(DEFAULT_DIST))
     ap.add_argument("--mode", choices=["auto", "deterministic", "llm"], default="auto")
     ap.add_argument("--llm-config", default=str(DEFAULT_LLM_CONFIG))
+    ap.add_argument("--schema-version", choices=["v2", "v3"], default="v3",
+                    help="Schema version for output (default: v3).")
+    ap.add_argument("--cooperation-policy", default=str(DEFAULT_COOPERATION_POLICY),
+                    help="Path to cooperation policy YAML (v3 only).")
+    ap.add_argument("--no-agent-nodes", action="store_true",
+                    help="Do not inject llm_planner and human_operator agent nodes.")
     ap.add_argument("--skip-discover", action="store_true",
                     help="Skip device discovery; only re-compose, validate, and build.")
     ap.add_argument("--skip-build", action="store_true",
                     help="Validate only; do not produce zip artifacts.")
+    ap.add_argument("--skip-hot-plug", action="store_true",
+                    help="Do not hot-plug into runtime loader after build.")
+    ap.add_argument("--loader-config", default=None,
+                    help="Path to embodiments.yaml for the runtime loader (hot-plug).")
     ap.add_argument("--strict", action="store_true",
                     help="Fail on builder warnings.")
     args = ap.parse_args(argv)
 
-    summary: Dict[str, Any] = {"ok": True, "steps": []}
+    summary: Dict[str, Any] = {"ok": True, "steps": [], "schema_version": args.schema_version}
 
     # Step 1 — discover (optional)
     if not args.skip_discover:
@@ -187,6 +262,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             summary["failed_at"] = "discover"
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 1
+
+        # Tool interface auto-discovery (v3)
+        if args.schema_version == "v3" and not args.usb:
+            tool_step = discover_tools(args.device_id, args.ip, args.http_base)
+            summary["steps"].append(tool_step)
+            if not tool_step["ok"]:
+                print(f"[warn] tool interface discovery failed for {args.device_id}; "
+                      "will use protocol:local stubs", file=sys.stderr)
+
         print("[onboard] device probed; remember to register the profile card with the topology runtime "
               "and refresh hub/topology_snapshot.json before composing.", file=sys.stderr)
 
@@ -201,8 +285,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     standalone = list(args.mark_standalone)
     if args.standalone and args.device_id and args.device_id not in standalone:
         standalone.append(args.device_id)
-    compose_step = compose(Path(args.topology), args.package_id, Path(args.out),
-                           args.mode, Path(args.llm_config), standalone, title=args.title)
+
+    cooperation_policy_path = Path(args.cooperation_policy) if args.schema_version == "v3" else None
+    include_agent_nodes = (args.schema_version == "v3") and (not args.no_agent_nodes)
+
+    compose_step = compose(
+        Path(args.topology), args.package_id, Path(args.out),
+        args.mode, Path(args.llm_config), standalone,
+        schema_version=args.schema_version,
+        cooperation_policy=cooperation_policy_path,
+        include_agent_nodes=include_agent_nodes,
+        title=args.title,
+    )
     summary["steps"].append(compose_step)
     if not compose_step["ok"]:
         summary["ok"] = False
@@ -222,6 +316,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     # Step 4 — build (optional)
+    zip_path = None
     if not args.skip_build:
         build_step = build(package_dir, Path(args.dist), strict=args.strict)
         summary["steps"].append(build_step)
@@ -230,24 +325,43 @@ def main(argv: Optional[List[str]] = None) -> int:
             summary["failed_at"] = "build"
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 1
+        # Find the built zip
+        for f in Path(args.dist).glob(f"{args.package_id}-*.embodiment.zip"):
+            zip_path = f
+            break
+
+    # Step 5 — hot-plug (v3, optional)
+    if args.schema_version == "v3" and not args.skip_hot_plug and not args.skip_build and zip_path:
+        loader_config = Path(args.loader_config) if args.loader_config else None
+        hp_step = hot_plug(zip_path, config_path=loader_config)
+        summary["steps"].append(hp_step)
+        if not hp_step["ok"]:
+            print(f"[warn] hot-plug failed: {hp_step.get('error', 'unknown')}; "
+                  "package is built but not live", file=sys.stderr)
 
     # Final report
+    compose_out = compose_step["stdout"] if isinstance(compose_step["stdout"], dict) else {}
     final: Dict[str, Any] = {
         "ok": True,
+        "schema_version": args.schema_version,
         "package_id": args.package_id,
         "package_dir": str(package_dir),
         "user_marked_standalone": standalone,
-        "mode_resolved": (compose_step["stdout"] or {}).get("mode_resolved")
-                         if isinstance(compose_step["stdout"], dict) else None,
-        "llm_status": (compose_step["stdout"] or {}).get("llm_status")
-                       if isinstance(compose_step["stdout"], dict) else None,
-        "included_nodes": (compose_step["stdout"] or {}).get("included_nodes")
-                           if isinstance(compose_step["stdout"], dict) else None,
-        "skipped_standalone_nodes": (compose_step["stdout"] or {}).get("skipped_standalone_nodes")
-                                     if isinstance(compose_step["stdout"], dict) else None,
-        "graph_id": (compose_step["stdout"] or {}).get("graph_id")
-                     if isinstance(compose_step["stdout"], dict) else None,
-        "artifacts": [s["stdout"] for s in summary["steps"] if isinstance(s["stdout"], dict)],
+        "mode_resolved": compose_out.get("mode_resolved"),
+        "llm_status": compose_out.get("llm_status"),
+        "included_nodes": compose_out.get("included_nodes"),
+        "skipped_standalone_nodes": compose_out.get("skipped_standalone_nodes"),
+        "graphs": compose_out.get("graphs") or compose_out.get("graph_id"),
+        "tool_interfaces_discovered": compose_out.get("tool_interfaces_discovered"),
+        "cooperation_policy": str(args.cooperation_policy) if args.schema_version == "v3" else None,
+        "hot_plug_status": next(
+            (s for s in summary["steps"] if s["step"] == "hot_plug"),
+            {"ok": False, "skipped": True}
+        ),
+        "artifacts": {
+            "package_dir": str(package_dir),
+            "zip": str(zip_path) if zip_path else None,
+        },
     }
     print(json.dumps(final, ensure_ascii=False, indent=2))
     return 0

@@ -1,0 +1,40 @@
+schema: cooperation_policy/v1
+name: default_cooperation_policy
+version: 0.1.0
+description: >
+  Default cooperation policy for embodiment packages. All node pairs are approved
+  for cooperation unless explicitly denied. Human operators can revoke cooperation
+  at runtime; rollback resets to this file's state.
+
+default_approval: approved
+
+# Per-pair overrides. Empty by default — all pairs cooperate.
+# Add entries here to deny or gate specific pairs:
+#
+#   - source: untrusted_external_agent
+#     target: g1_real_sensor_only
+#     approval: denied
+#     reason: "External agent not yet authorized for direct robot access"
+#
+pairs: []
+
+# Global constraints that apply regardless of per-pair approval
+global_constraints:
+  # Sensor-only nodes cannot be source of motion/command edges
+  sensor_only_nodes_cannot_initiate_motion_edges: true
+
+  # Agent nodes (LLM or human) must be listed in the package registry
+  # before they can participate in any graph
+  agent_nodes_require_explicit_registration: true
+
+  # If any graph uses supervisor-class actions, a human_operator node
+  # must exist in the graph
+  human_operator_must_exist_for_supervisor_class: true
+
+# Rollback configuration
+rollback:
+  # manual: only triggered by explicit cooperation.rollback() call
+  # on_safety_violation: auto-rollback when a safety invariant is breached
+  trigger: manual
+  # What state to restore to
+  target: this_file

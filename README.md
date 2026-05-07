@@ -1,137 +1,226 @@
 # Embodiments
 
-> Agents need skills, tools, memory — and embodiments.
+**Shareable, portable packages that let LLM agent systems safely interact with physical robots and sensors.**
 
-Embodiments are installable, shareable packages for the physical side of an agent runtime: robots, sensors, actuators, hardware rigs, and physical collaboration patterns.
+> [中文文档 / Chinese Documentation](./README_CN.md)
 
-They sit beside skills, tools, and MCP servers:
+---
 
-```text
-skills/       software procedures      (SKILL.md is the agent entry)
-tools/        callable tools
-mcp/          external tool/context servers
-embodiments/  physical entities + collaboration graphs   (EMBODIMENT.md is the agent entry)
+## Overview
+
+Embodiments is an open standard for packaging physical hardware interfaces — robots, sensors, actuators — so that any LLM agent system can discover, mount, and use them like Skills or MCP servers.
+
+```
+Agent System (Codex / OpenClaw / LangGraph / custom)
+├── MCP Servers    — external data & API access
+├── Skills         — reusable task procedures (SKILL.md)
+├── Tools          — single-call function interfaces
+└── Embodiments    — physical world: device interfaces + collaboration (EMBODIMENT.md)
 ```
 
-A skill is useful because `SKILL.md` tells the agent *when* and *how* to use it. An embodiment is useful because `EMBODIMENT.md` tells the agent which physical nodes exist, which actions are safe, what to check before execution, and what to never do.
+One package, two files. Download it, bind your hardware IPs, and your agent can see and control the physical world.
 
-## Slim package layout (2 required files)
+## Key Features
 
-The recommended layout is intentionally small:
+- **Plug-and-play** — `discover() → activate() → get_tools()` in 3 lines of Python
+- **Hardware-portable** — packages declare WHAT hardware they need, not WHERE it is. Bind endpoints at mount time.
+- **Safety-first** — sensor-only by default, forbidden actions enforced, human approval gates for dangerous operations
+- **Shareable** — publish your robot's embodiment package; anyone with the same hardware can use it
+- **Hot-swappable** — add/remove/swap packages at runtime without restart
+- **Agent-readable** — `EMBODIMENT.md` tells the agent everything: available tools, safety rules, workflows, failure modes
 
-```text
-<package>/
-  EMBODIMENT.md       # agent reads this; SKILL.md-style with YAML frontmatter
-  embodiment.yaml     # runtime reads this; registry + graphs inlined
-  evidence/*.json     # optional; verified probe results
-  probes/*.py         # optional; passive only
-  adapters/*          # optional; adapter contract or templates
-```
+## Quick Start
 
-That is it. There is no separate `registry/`, `graphs/`, `profiles/`, or `README.md` directory by default. The registry is `embodiment.yaml > registry.nodes`. The graph is `embodiment.yaml > graphs[0]`. The profile/readme content lives inside `EMBODIMENT.md`.
-
-## Layout
-
-```text
-SPEC.md                                     short entry doc, points to specs/
-BUILDING.md                                 contributor build workflow
-specs/
-  EMBODIMENT_PACKAGE_SPEC.md                package on-disk format
-  AGENT_READABLE_CONTEXT_PACKAGE.md         what EMBODIMENT.md must contain
-  EMBODIMENT_GRAPH_SPEC.md                  task/role graph schema (v2)
-  NODE_REGISTRY_SPEC.md                     registry schema
-  SAFETY_POLICY_SPEC.md                     install/runtime/LLM invariants
-  COMPOSER_SPEC.md                          composer behavior
-builder/build_embodiment.py                 offline validator + zip packager
-composer/compose_context.py                 main composer (LLM-first, 2-file output)
-composer_legacy/                            deprecated pairwise composer
-templates/context_package/                  EMBODIMENT.md / yaml templates
-policies/default_sensor_only_policy.yaml    composer filter+safety policy
-skills/
-  onboard-embodiment/                       plug-and-play skill: probe → compose → validate → build
-    SKILL.md                                  agent-readable instructions
-    onboard.py                                thin orchestrator script
-packages/
-  unitree_g1_sensor_only/                   single-robot package
-  usb_1080p_camera/                         single-sensor package
-  g1_usb_dual_view/                         dual-view context package
-generated/                                  composer outputs
-dist/                                       built .embodiment.zip + .manifest.json
-```
-
-## Two pieces, peer to skills/MCP/tools
-
-The embodiments module ships **two complementary pieces**, just as the skill ecosystem ships SKILL.md plus the runtime that reads it.
-
-1. **The spec + reference packages** (this directory). What an embodiment package looks like, what makes it agent-readable, how it gets validated and built.
-2. **The onboarding skill** at `embodiments/skills/onboard-embodiment/`. When a new robot, sensor, or hardware is plugged in, this skill:
-   - probes the device passively (no motion);
-   - generates a profile card via `robot_node_onboarding`;
-   - extends the deployment's context package automatically — adds the new node to the registry, regenerates the collaborative graph so the new device participates with already-onboarded ones;
-   - honors `standalone_only` (a node opted out via topology metadata or `--mark-standalone` is registered but excluded from auto-collaboration);
-   - validates and builds the result.
-
-   An LLM agent reads `SKILL.md` to know when to invoke and what each step does; the orchestrator at `onboard.py` runs the underlying tools end-to-end so the user gets one command:
-
-   ```bash
-   python embodiments/skills/onboard-embodiment/onboard.py \
-     --device-id new_robot_01 --device-kind robot --ip 192.168.5.20 \
-     --package-id current_lab_sensor_context
-   ```
-
-## Quick start
-
-### Validate a package
+### Install
 
 ```bash
-python embodiments/builder/build_embodiment.py validate embodiments/packages/unitree_g1_sensor_only
+pip install pyyaml  # only dependency
 ```
 
-### Build a package
+### Use in your agent system
 
-```bash
-python embodiments/builder/build_embodiment.py build embodiments/packages/unitree_g1_sensor_only \
-  --out embodiments/dist
+```python
+from embodiments.runtime.loader import EmbodimentLoader
+
+loader = EmbodimentLoader(config_path="./embodiments.yaml")
+loader.discover()
+loader.activate("g1_usb_dual_view", bindings={
+    "robot_local_view": "http://192.168.1.100:8080",
+    "external_view":    "http://192.168.1.101:8081",
+})
+
+# Inject into agent
+context = loader.get_context()    # EMBODIMENT.md → system prompt
+tools = loader.get_tools()        # OpenAI-format tool definitions
+
+# Agent calls tools as needed
+result = loader.dispatch_tool("g1_realsense_color_sensor.capture_frame", {
+    "resolution": "1080p"
+})
 ```
 
-### Generate a context package from current topology (LLM-first)
+### Validate & build packages
 
 ```bash
-# Default: --mode auto. Uses LLM if hub/copaw_config.json is configured.
-python embodiments/composer/compose_context.py generate \
+# Validate
+python builder/build_embodiment.py validate packages/g1_usb_dual_view
+
+# Build distributable zip
+python builder/build_embodiment.py build packages/g1_usb_dual_view --out dist
+
+# Generate from topology
+python composer/compose_context.py generate \
   --topology hub/topology_snapshot.json \
-  --package-id current_lab_sensor_context \
-  --out embodiments/generated
-
-# Force deterministic (no LLM call):
-python embodiments/composer/compose_context.py generate \
-  --topology hub/topology_snapshot.json --mode deterministic ...
-
-# Require LLM (fail if no config):
-python embodiments/composer/compose_context.py generate \
-  --topology hub/topology_snapshot.json --mode llm ...
+  --package-id my_lab_context \
+  --out generated
 ```
 
-The composer always produces exactly two files: `EMBODIMENT.md` (agent-readable) and `embodiment.yaml` (registry + 1 primary graph inlined).
+## Package Format
 
-## How an agent runtime plugs in
+Two required files:
 
-```text
-1. parse EMBODIMENT.md   (planner-grounding context, SKILL.md-style)
-2. read  embodiment.yaml (registry.nodes, graphs[0], safety.forbidden_actions)
-3. register nodes        (only with user authorization)
-4. plan via graphs[0]    (roles + nodes + readiness + recovery)
-5. enforce safety        (block forbidden_actions at the executor, not just the planner)
+```
+<package>/
+  EMBODIMENT.md       # agent reads this (like SKILL.md)
+  embodiment.yaml     # runtime reads this (registry + tools + safety)
 ```
 
-That is the full contract.
+### Package kinds
 
-## Safety guarantees
+| Kind | Description | Example |
+|------|-------------|---------|
+| `robot` | Single robot device | `unitree_g1_sensor_only` |
+| `sensor` | Single sensor device | `usb_1080p_camera` |
+| `embodiment_context` | Multi-device collaboration scene | `g1_usb_dual_view` |
 
-- Build is offline — never contacts hardware.
-- Install does not move — filesystem-only.
-- Sensor-only is the default — `sensor_only: true` cannot declare motion or manipulation as safe.
-- No mock substitution — if a referenced real-device node is missing, the runtime fails fast.
-- LLM cannot expand safety — composer rejects LLM output that drops a forbidden action, drops a section, or contains promotion language.
+Device packages are shareable atoms. Context packages compose them into collaboration scenes.
 
-See `specs/SAFETY_POLICY_SPEC.md` for the full list of invariants.
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Runtime Loader (runtime/loader.py)                           │
+│                                                             │
+│  discover() → activate(bindings) → get_context/get_tools    │
+│  dispatch_tool() → safety gate → cooperation check → go     │
+│  cooperation: approve / revoke / rollback                    │
+│  hot_plug() → add packages without restart                  │
+└─────────────────────────────────────────────────────────────┘
+         │                         │
+         ▼                         ▼
+  ┌──────────────┐      ┌─────────────────────────┐
+  │ EMBODIMENT.md │      │ embodiment.yaml          │
+  │ (agent context)│      │ (registry + tools +     │
+  │               │      │  cooperation + safety)   │
+  └──────────────┘      └─────────────────────────┘
+```
+
+### Cooperation Network
+
+Human-gated permission layer. Controls which nodes can collaborate:
+
+- **approve** — node pair can exchange data (default)
+- **revoke** — edge becomes dormant, tools hidden from agent
+- **rollback** — reset all runtime overrides to policy file defaults
+
+### Safety Model
+
+| Class | Behavior |
+|-------|----------|
+| `safe` | Agent calls freely |
+| `confirmation` | Requires human approval before dispatch |
+| `supervisor` | Requires supervisor + human approval |
+| `forbidden` | Tool not registered, invisible to agent |
+
+## Project Layout
+
+```
+runtime/                    Runtime loader (agent systems import this)
+  loader.py                   EmbodimentLoader + EmbodimentPackage
+builder/                    Offline validator + zip packager
+  build_embodiment.py         validate / build / build-all
+composer/                   Deterministic-first package generator
+  compose_context.py          topology → context package
+packages/                   Reference packages
+  g1_usb_dual_view/           v3 multi-device context (reference)
+  unitree_g1_sensor_only/     v2 single-robot device package
+  usb_1080p_camera/           v2 single-sensor device package
+policies/                   Safety + cooperation policy files
+specs/                      8 authoritative specification files
+skills/onboard-embodiment/  Plug-and-play device onboarding skill
+templates/                  Configuration templates
+```
+
+## Safety Guarantees
+
+1. **Build is offline** — validator never contacts hardware
+2. **Install does not move** — no motor commands during package install
+3. **Sensor-only default** — motion/manipulation/audio forbidden until explicitly promoted
+4. **No mock substitution** — real devices must exist or fail fast
+5. **Cooperation defaults approved** — revocation creates dormant edges, not deletions
+
+## Changelog
+
+### v0.4.0 (2025-05)
+
+**Runtime Loader** — new pluggable adapter for agent systems
+- `EmbodimentLoader` class: discover → activate → get_context/get_tools → dispatch_tool
+- Hardware portability: `@role:xxx` placeholders + bindings at mount time
+- Cooperation management: approve/revoke/rollback with dormant edge semantics
+- Safety-gated dispatch: forbidden ops hidden, confirmation ops wrapped
+- Hot-plug: add packages at runtime without restart
+
+**Simplified Architecture** — removed execution engine
+- Removed graph execution engine (agent systems like LangGraph/OpenClaw handle orchestration)
+- Replaced 265-line rigid `graphs:` YAML schema with 10-line `workflows:` index
+- Collaboration workflows described in EMBODIMENT.md as readable markdown steps
+- Loader provides context + tools + safety gates only — no workflow orchestration
+
+**Package Portability** — shareable like npm packages
+- `hardware_requirements` block declares needed hardware roles
+- `@role:xxx` parameterized endpoints (no IPs in packages)
+- Bindings file pattern (local, never committed)
+- `check_requirements()` validates before activation
+
+**Device Packages Upgraded**
+- `unitree_g1_sensor_only` and `usb_1080p_camera` now have `tool_interface`
+- Both packages expose tools via the loader (health_check, capture_frame, get_state, record_audio)
+- Added `hardware_requirements` for portability
+- Registry upgraded to v2 with `participant_type`
+
+**Composer Simplified**
+- Outputs minimal `workflows:` index instead of verbose graph definitions
+- Always includes standard forbidden actions for restrictive profiles
+- Full workflow steps live in EMBODIMENT.md, not YAML
+
+**Builder Updated**
+- Accepts `workflows:` as alternative to `graphs:` for context packages
+- New `_validate_workflows()` checks workflow entries reference valid nodes
+- Backward compatible: old `graphs:` packages still validate
+
+### v0.3.0 (2025-04)
+
+- Two-layer graph architecture (cooperation + execution networks)
+- Agent nodes as first-class participants (llm_agent, human_operator)
+- Tool interfaces per node with safety_class
+- Multiple graphs per package (intent-matched via trigger_keywords)
+- Cooperation network spec with human-gated approval
+- Integration spec for Codex/OpenClaw
+- Deterministic-first composer (LLM optional, prose-only)
+
+### v0.2.0 (2025-03)
+
+- Slim 2-file package format (EMBODIMENT.md + embodiment.yaml)
+- Builder: offline validate + zip packager
+- Composer: topology → context package generation
+- Onboarding skill: probe → compose → validate → build
+- Reference packages: unitree_g1_sensor_only, usb_1080p_camera, g1_usb_dual_view
+
+### v0.1.0 (2025-02)
+
+- Initial spec: package format, node registry, safety policy
+- EMBODIMENT.md as SKILL.md-style agent entry document
+
+## License
+
+Apache-2.0

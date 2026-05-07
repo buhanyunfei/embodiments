@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
-"""Embodiment context composer (main).
+"""Embodiment context composer v3.
 
-Generates ONE agent-readable embodiment context package from a topology snapshot.
+Generates agent-readable embodiment context packages from a topology snapshot.
+Deterministic-first: all structural output (graphs, tool interfaces, cooperation)
+is generated deterministically. LLM is optional prose-enhancement only.
 
-Output (slim layout, 2 required files):
-
+Output (slim layout):
     <out>/<package_id>/
-      EMBODIMENT.md       agent-readable, SKILL.md-style, capability-complete
-      embodiment.yaml     runtime-readable, registry + 1 graph inlined
+      EMBODIMENT.md       agent-readable context (SKILL.md-style)
+      embodiment.yaml     runtime-readable (registry + graphs + cooperation)
 
-Safety profiles (--safety-profile):
-  sensor_only         safe-class only; motion/manipulation/audio_output forbidden  [default]
-  motion_supervised   locomotion enabled with confirmation; manipulation gated
-  full_humanoid       all capabilities available; high-risk requires confirmation/supervisor
-
-Modes (--mode):
-  auto          use LLM if hub/copaw_config.json configured, else deterministic  [default]
-  llm           require LLM; fail if not configured
-  deterministic never call LLM
+New in v3:
+  - Two-layer graph architecture (cooperation network + execution network)
+  - Agent nodes (llm_agent, human_operator) as first-class participants
+  - Tool interfaces per node
+  - Multiple graphs per package (intent-matched)
+  - Execution workflows with ordering semantics
 """
 from __future__ import annotations
 
@@ -33,21 +31,23 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import yaml
 
-# ── Defaults ─────────────────────────────────────────────────────────────────
+# ── Constants ────────────────────────────────────────────────────────────────
 
 SAFE_DEFAULT = ["observe", "inspect", "listen", "perceive", "wait", "standby", "health_check"]
 MOTION_DEFAULT = ["walk", "turn", "navigate", "move", "whole_body_motion", "follow", "patrol"]
 MANIPULATION_DEFAULT = ["reach", "grasp", "pick", "place", "carry", "hand_over", "open_door",
                         "arm_motion", "hand_motion", "push", "pull"]
 AUDIO_OUTPUT_DEFAULT = ["audio_output", "speak", "play_sound"]
+AGENT_SAFE_DEFAULT = ["plan", "reason", "describe", "approve", "supervise", "override", "rollback"]
 
-OBSERVER_NODE_TYPES_DEFAULT = ["physical_robot", "sensor", "camera", "microphone"]
-SCHEMA_PACKAGE = "embodiment_package/v2"
-SCHEMA_GRAPH = "embodiment_graph/v2"
-SCHEMA_REGISTRY = "embodiment_node_registry/v1"
+OBSERVER_NODE_TYPES_DEFAULT = ["physical_robot", "sensor", "camera", "microphone", "agent_node"]
+SCHEMA_PACKAGE = "embodiment_package/v3"
+SCHEMA_PACKAGE_V2 = "embodiment_package/v2"
+SCHEMA_GRAPH = "embodiment_graph/v3"
+SCHEMA_REGISTRY = "embodiment_node_registry/v2"
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _slug(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_\-]+", "_", s or "").strip("_").lower() or "embodiment_context"
@@ -71,12 +71,10 @@ def _mask_key(k: Optional[str]) -> str:
     return f"{k[:4]}...{k[-4:]}"
 
 
-# ── Capability classification ─────────────────────────────────────────────────
+# ── Capability Classification ────────────────────────────────────────────────
 
 def _build_class_map(policy: Dict[str, Any]) -> Dict[str, str]:
-    """Return {action_id -> class_name} from policy."""
     raw = policy.get("capability_classes") or {}
-    # Policy yaml may store as dict of dicts or flat key:value
     m: Dict[str, str] = {}
     if isinstance(raw, dict):
         for k, v in raw.items():
@@ -89,11 +87,12 @@ def _build_class_map(policy: Dict[str, Any]) -> Dict[str, str]:
         m.setdefault(action, "manipulation")
     for action in AUDIO_OUTPUT_DEFAULT:
         m.setdefault(action, "audio_output")
+    for action in AGENT_SAFE_DEFAULT:
+        m.setdefault(action, "safe")
     return m
 
 
 def _build_profile(policy: Dict[str, Any], profile_name: str) -> Dict[str, Any]:
-    """Resolve a named safety profile to a dict with forbidden_classes, confirmation_classes, etc."""
     profiles = policy.get("safety_profiles") or {}
     p = profiles.get(profile_name) or {}
     return {
@@ -107,7 +106,6 @@ def _build_profile(policy: Dict[str, Any], profile_name: str) -> Dict[str, Any]:
 
 
 def _capability_status(action: str, class_map: Dict[str, str], profile: Dict[str, Any]) -> str:
-    """Return 'safe' | 'confirmation' | 'supervisor' | 'forbidden' for an action+profile."""
     cls = class_map.get(action, "unknown")
     if cls in profile["forbidden_classes"]:
         return "forbidden"
@@ -117,7 +115,6 @@ def _capability_status(action: str, class_map: Dict[str, str], profile: Dict[str
         return "confirmation"
     if cls in profile["allowed_classes"]:
         return "safe"
-    # unknown class -> conservative: treat as confirmation
     return "confirmation"
 
 
@@ -129,7 +126,7 @@ def _safe_actions(all_caps: List[str], class_map: Dict[str, str], profile: Dict[
     return sorted(a for a in all_caps if _capability_status(a, class_map, profile) == "safe")
 
 
-# ── Node normalization ────────────────────────────────────────────────────────
+# ── Node Normalization ───────────────────────────────────────────────────────
 
 def _normalize_nodes(snapshot: Dict[str, Any], policy: Dict[str, Any],
                      standalone_overrides: Optional[Set[str]] = None) -> List[Dict[str, Any]]:
@@ -142,7 +139,6 @@ def _normalize_nodes(snapshot: Dict[str, Any], policy: Dict[str, Any],
     for n in raw:
         meta = n.get("metadata") or {}
         profile = meta.get("robot_profile") or meta.get("embodiment_profile") or {}
-        # Collect all declared capabilities (topology + profile card)
         all_caps = list(dict.fromkeys(
             (n.get("capabilities") or [])
             + (profile.get("capabilities") or [])
@@ -152,16 +148,18 @@ def _normalize_nodes(snapshot: Dict[str, Any], policy: Dict[str, Any],
         if sensors:
             all_caps.append("observe")
         all_caps = list(dict.fromkeys(all_caps))
-        # Safe for collaboration = intersection with safe_collab_set
         safe_collab = sorted(c for c in all_caps if c in safe_collab_set)
         limits = profile.get("limits") or meta.get("limits") or {}
         coll = meta.get("collaboration_policy") or profile.get("collaboration_policy") or {}
         nid = n.get("id") or n.get("node_id")
         forced_standalone = nid in standalone_overrides
+        node_type = n.get("node_type") or meta.get("node_type") or "unknown"
+
         node = {
             "id": nid,
             "name": n.get("name") or nid,
-            "node_type": n.get("node_type") or meta.get("node_type") or "unknown",
+            "node_type": node_type,
+            "participant_type": _infer_participant_type(node_type),
             "all_capabilities": all_caps,
             "safe_capabilities": safe_collab,
             "sensors": sensors,
@@ -175,25 +173,21 @@ def _normalize_nodes(snapshot: Dict[str, Any], policy: Dict[str, Any],
             "image_path": meta.get("image_path"),
             "last_rms": meta.get("last_rms"),
             "real_device": bool(meta.get("real_device")),
+            "tool_interface": meta.get("tool_interface") or profile.get("tool_interface"),
         }
         if node["id"]:
             out.append(node)
     return out
 
 
-def _select_nodes(nodes: List[Dict[str, Any]], policy: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    allowed = set(policy.get("observer_node_types") or OBSERVER_NODE_TYPES_DEFAULT)
-    included, skipped = [], []
-    for n in nodes:
-        if n["standalone_only"]:
-            skipped.append({"id": n["id"], "reason": n.get("standalone_reason") or "standalone_only"})
-            continue
-        if n["node_type"] not in allowed:
-            continue
-        if not n["all_capabilities"] and not n["safe_capabilities"]:
-            continue
-        included.append(n)
-    return included, skipped
+def _infer_participant_type(node_type: str) -> str:
+    if node_type in ("physical_robot", "actuator"):
+        return "robot_node"
+    if node_type in ("sensor", "camera", "microphone"):
+        return "sensor_node"
+    if node_type in ("perception_model", "agent_node", "llm_agent", "human_operator"):
+        return "agent_node"
+    return "sensor_node"
 
 
 def _node_role(n: Dict[str, Any]) -> str:
@@ -201,6 +195,10 @@ def _node_role(n: Dict[str, Any]) -> str:
     node_type = (n.get("node_type") or "").lower()
     caps = set(n.get("all_capabilities") or [])
     sensors = set(s.lower() for s in (n.get("sensors") or []))
+    if node_type in ("llm_agent", "agent_node") or n.get("participant_type") == "agent_node":
+        if "approve" in caps or "supervise" in caps:
+            return "supervisor"
+        return "planner"
     if node_type == "physical_robot":
         return "robot_local_view"
     if "mic" in nid or sensors == {"microphone"} or caps == {"listen"}:
@@ -212,21 +210,258 @@ def _node_role(n: Dict[str, Any]) -> str:
     return "support_node"
 
 
-# ── Facts ─────────────────────────────────────────────────────────────────────
+def _select_nodes(nodes: List[Dict[str, Any]], policy: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    allowed = set(policy.get("observer_node_types") or OBSERVER_NODE_TYPES_DEFAULT)
+    included, skipped = [], []
+    for n in nodes:
+        if n["standalone_only"]:
+            skipped.append({"id": n["id"], "reason": n.get("standalone_reason") or "standalone_only"})
+            continue
+        if n["node_type"] not in allowed and n["participant_type"] != "agent_node":
+            continue
+        if not n["all_capabilities"] and not n["safe_capabilities"]:
+            continue
+        included.append(n)
+    return included, skipped
+
+
+# ── Agent Node Injection ─────────────────────────────────────────────────────
+
+def _inject_agent_nodes(nodes: List[Dict[str, Any]], profile: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Add standard llm_planner and human_operator nodes if not already present."""
+    ids = {n["id"] for n in nodes}
+
+    if "llm_planner" not in ids:
+        nodes.append({
+            "id": "llm_planner",
+            "name": "LLM Planning Agent",
+            "node_type": "agent_node",
+            "participant_type": "agent_node",
+            "agent_subtype": "llm_agent",
+            "all_capabilities": ["plan", "reason", "describe"],
+            "safe_capabilities": ["plan", "reason", "describe"],
+            "sensors": [],
+            "limits": {},
+            "endpoint": None,
+            "agent_ref": None,
+            "parent_robot": None,
+            "standalone_only": False,
+            "standalone_reason": None,
+            "evidence_excerpt": "",
+            "image_path": None,
+            "last_rms": None,
+            "real_device": False,
+            "tool_interface": {
+                "protocol": "tool_call",
+                "endpoint": None,
+                "operations": [
+                    {
+                        "operation_id": "generate_plan",
+                        "description": "Generate an execution plan for a physical task",
+                        "input_schema": {"type": "object", "properties": {"task": {"type": "string"}, "constraints": {"type": "object"}}, "required": ["task"]},
+                        "output_schema": {"type": "object", "properties": {"plan_steps": {"type": "array"}, "confidence": {"type": "number"}}},
+                        "latency_estimate_ms": 3000,
+                        "safety_class": "safe",
+                    },
+                    {
+                        "operation_id": "describe_scene",
+                        "description": "Describe the current scene from provided frames",
+                        "input_schema": {"type": "object", "properties": {"frame_paths": {"type": "array", "items": {"type": "string"}}}, "required": ["frame_paths"]},
+                        "output_schema": {"type": "object", "properties": {"description": {"type": "string"}}},
+                        "latency_estimate_ms": 2000,
+                        "safety_class": "safe",
+                    },
+                ],
+            },
+        })
+
+    if "human_operator" not in ids:
+        nodes.append({
+            "id": "human_operator",
+            "name": "Human Operator",
+            "node_type": "agent_node",
+            "participant_type": "agent_node",
+            "agent_subtype": "human_operator",
+            "all_capabilities": ["approve", "supervise", "override", "rollback"],
+            "safe_capabilities": ["approve", "supervise", "override", "rollback"],
+            "sensors": [],
+            "limits": {},
+            "endpoint": None,
+            "agent_ref": None,
+            "parent_robot": None,
+            "standalone_only": False,
+            "standalone_reason": None,
+            "evidence_excerpt": "",
+            "image_path": None,
+            "last_rms": None,
+            "real_device": False,
+            "tool_interface": {
+                "protocol": "tool_call",
+                "endpoint": None,
+                "operations": [
+                    {
+                        "operation_id": "request_approval",
+                        "description": "Request human approval for a gated action",
+                        "input_schema": {"type": "object", "properties": {"action": {"type": "string"}, "context": {"type": "string"}, "risk_level": {"type": "string", "enum": ["low", "medium", "high"]}}, "required": ["action", "context"]},
+                        "output_schema": {"type": "object", "properties": {"approved": {"type": "boolean"}, "reason": {"type": "string"}}},
+                        "latency_estimate_ms": None,
+                        "safety_class": "safe",
+                    },
+                    {
+                        "operation_id": "provide_feedback",
+                        "description": "Human provides feedback or correction to the system",
+                        "input_schema": {"type": "object", "properties": {"feedback": {"type": "string"}, "target_node": {"type": "string"}}},
+                        "output_schema": {"type": "object", "properties": {"acknowledged": {"type": "boolean"}}},
+                        "latency_estimate_ms": None,
+                        "safety_class": "safe",
+                    },
+                ],
+            },
+        })
+
+    return nodes
+
+
+# ── Cooperation Network ──────────────────────────────────────────────────────
+
+def _load_cooperation_policy(path: Optional[Path]) -> Dict[str, Any]:
+    if path and path.exists():
+        return _load_yaml(path)
+    return {"schema": "cooperation_policy/v1", "default_approval": "approved", "pairs": []}
+
+
+def _resolve_cooperation(nodes: List[Dict[str, Any]], coop_policy: Dict[str, Any]) -> Dict[str, Any]:
+    """Compute effective cooperation state for all node pairs."""
+    default = coop_policy.get("default_approval", "approved")
+    pairs = coop_policy.get("pairs") or []
+    pair_map: Dict[Tuple[str, str], str] = {}
+    for p in pairs:
+        pair_map[(p["source"], p["target"])] = p.get("approval", default)
+        pair_map[(p["target"], p["source"])] = p.get("approval", default)
+
+    node_ids = [n["id"] for n in nodes]
+    computed = []
+    for i, a in enumerate(node_ids):
+        for b in node_ids[i + 1:]:
+            key = (a, b)
+            rev_key = (b, a)
+            if key in pair_map:
+                approval = pair_map[key]
+                source_is = "policy_override"
+            elif rev_key in pair_map:
+                approval = pair_map[rev_key]
+                source_is = "policy_override"
+            else:
+                approval = default
+                source_is = "policy_default"
+            computed.append({"source": a, "target": b, "approval": approval, "source_is": source_is})
+
+    return {
+        "policy_ref": "cooperation_policy.yaml",
+        "default_approval": default,
+        "runtime_override_enabled": True,
+        "rollback_target": "policy_file",
+        "computed_pairs": computed,
+    }
+
+
+def _is_cooperation_approved(source: str, target: str, coop_state: Dict[str, Any]) -> bool:
+    for p in coop_state.get("computed_pairs", []):
+        if (p["source"] == source and p["target"] == target) or \
+           (p["source"] == target and p["target"] == source):
+            return p["approval"] == "approved"
+    return coop_state.get("default_approval", "approved") == "approved"
+
+
+# ── Graph Generation (Multi-Graph, Two-Layer) ────────────────────────────────
+
+def _build_workflows(facts: Dict[str, Any], coop_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Generate lightweight workflow index entries based on available nodes and safety profile."""
+    workflows = []
+
+    observers = facts["observers"]
+    audio = facts["audio_listeners"]
+    robots = facts["robots"]
+    profile = facts["active_profile"]
+    included = facts["included_nodes"]
+
+    if observers or audio:
+        primary = [n["id"] for n in observers[:4]]
+        primary += ["llm_planner", "human_operator"]
+        workflows.append({
+            "id": "scene_observation",
+            "description": "Observe and describe the environment using available sensors with human-gated cooperation.",
+            "trigger_keywords": ["describe", "observe", "see", "look", "view", "scene", "workspace", "what"],
+            "safety_level": profile["name"],
+            "primary_nodes": primary,
+        })
+
+    if robots and "motion" not in profile["forbidden_classes"]:
+        workflows.append({
+            "id": "motion_with_confirmation",
+            "description": "Execute robot locomotion with explicit human confirmation before each motion command.",
+            "trigger_keywords": ["walk", "move", "go", "navigate", "patrol", "forward", "backward", "turn"],
+            "safety_level": profile["name"],
+            "primary_nodes": [robots[0]["id"], "llm_planner", "human_operator"],
+        })
+
+    if included:
+        hardware = [n["id"] for n in included if n["participant_type"] != "agent_node"]
+        workflows.append({
+            "id": "sensor_health_audit",
+            "description": "Check connectivity and readiness of all hardware nodes.",
+            "trigger_keywords": ["health", "status", "check", "ready", "online", "connectivity", "audit"],
+            "safety_level": "sensor_only",
+            "primary_nodes": hardware + ["llm_planner"],
+        })
+
+    return workflows
+
+
+
+# ── Registry Assembly ────────────────────────────────────────────────────────
+
+def _registry_inline(included: List[Dict[str, Any]]) -> Dict[str, Any]:
+    nodes = []
+    for n in included:
+        entry: Dict[str, Any] = {
+            "id": n["id"],
+            "name": n.get("name"),
+            "node_type": n["node_type"],
+            "participant_type": n.get("participant_type", _infer_participant_type(n["node_type"])),
+            "role": _node_role(n),
+            "all_capabilities": n.get("all_capabilities") or [],
+            "safe_capabilities": n.get("safe_capabilities") or [],
+            "sensors": n.get("sensors") or [],
+            "limits": n.get("limits") or {},
+            "standalone_only": n.get("standalone_only", False),
+            "endpoint_configured": bool(n.get("endpoint")),
+            "real_device": n.get("real_device", False),
+            "parent_robot": n.get("parent_robot"),
+        }
+        if n.get("participant_type") == "agent_node":
+            entry["agent_subtype"] = n.get("agent_subtype", "llm_agent")
+        if n.get("tool_interface"):
+            entry["tool_interface"] = n["tool_interface"]
+        nodes.append(entry)
+    return {"schema": SCHEMA_REGISTRY, "nodes": nodes}
+
+
+# ── Facts ────────────────────────────────────────────────────────────────────
 
 def _facts(snapshot: Dict[str, Any], policy: Dict[str, Any], package_id: str, title: str,
            active_profile: Dict[str, Any], class_map: Dict[str, str],
-           standalone_overrides: Optional[Set[str]] = None) -> Dict[str, Any]:
+           standalone_overrides: Optional[Set[str]] = None,
+           include_agent_nodes: bool = True) -> Dict[str, Any]:
     nodes_all = _normalize_nodes(snapshot, policy, standalone_overrides=standalone_overrides)
     included, skipped = _select_nodes(nodes_all, policy)
 
-    # Enrich each included node with per-capability status under active profile
+    if include_agent_nodes:
+        included = _inject_agent_nodes(included, active_profile)
+
     for n in included:
         n["capability_table"] = {
-            cap: {
-                "class": class_map.get(cap, "unknown"),
-                "status": _capability_status(cap, class_map, active_profile),
-            }
+            cap: {"class": class_map.get(cap, "unknown"), "status": _capability_status(cap, class_map, active_profile)}
             for cap in n["all_capabilities"]
         }
 
@@ -236,6 +471,13 @@ def _facts(snapshot: Dict[str, Any], policy: Dict[str, Any], package_id: str, ti
     robots = [n for n in included if n.get("node_type") == "physical_robot"]
 
     forbidden = _forbidden_actions(all_node_caps, class_map, active_profile)
+    # Ensure standard forbidden actions are always listed for restrictive profiles
+    if "motion" in active_profile["forbidden_classes"]:
+        forbidden = sorted(set(forbidden) | set(MOTION_DEFAULT))
+    if "manipulation" in active_profile["forbidden_classes"]:
+        forbidden = sorted(set(forbidden) | set(MANIPULATION_DEFAULT))
+    if "audio_output" in active_profile["forbidden_classes"]:
+        forbidden = sorted(set(forbidden) | set(AUDIO_OUTPUT_DEFAULT))
     safe = _safe_actions(all_node_caps, class_map, active_profile)
 
     return {
@@ -255,152 +497,129 @@ def _facts(snapshot: Dict[str, Any], policy: Dict[str, Any], package_id: str, ti
     }
 
 
-# ── Graph ─────────────────────────────────────────────────────────────────────
+# ── EMBODIMENT.md Generation (Deterministic, v3) ─────────────────────────────
 
-def _primary_graph(facts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _tool_interface_md(nodes: List[Dict[str, Any]]) -> str:
+    lines = []
+    for n in nodes:
+        ti = n.get("tool_interface")
+        if not ti or not ti.get("operations"):
+            continue
+        lines.append(f"### `{n['id']}` tools")
+        lines.append("")
+        lines.append("| Operation | Protocol | Endpoint | Latency | Safety Class |")
+        lines.append("|-----------|----------|----------|---------|--------------|")
+        for op in ti["operations"]:
+            endpoint = ""
+            if ti.get("protocol") == "http" and op.get("method") and op.get("path"):
+                endpoint = f"{op['method']} {op['path']}"
+            elif ti.get("protocol") == "tool_call":
+                endpoint = "tool_call"
+            latency = f"~{op['latency_estimate_ms']}ms" if op.get("latency_estimate_ms") else "variable"
+            lines.append(f"| `{op['operation_id']}` | {ti['protocol']} | {endpoint} | {latency} | {op.get('safety_class', 'safe')} |")
+        lines.append("")
+    return "\n".join(lines) if lines else "_No tool interfaces declared._"
+
+
+def _cooperation_boundaries_md(coop_state: Dict[str, Any]) -> str:
+    active = [p for p in coop_state.get("computed_pairs", []) if p["approval"] == "approved"]
+    dormant = [p for p in coop_state.get("computed_pairs", []) if p["approval"] != "approved"]
+
+    lines = ["### Active cooperation"]
+    if active:
+        lines += ["", "| Source | Target | Approved By |", "|--------|--------|-------------|"]
+        for p in active[:20]:
+            lines.append(f"| `{p['source']}` | `{p['target']}` | {p['source_is']} |")
+    else:
+        lines.append("\n_No active cooperation pairs._")
+
+    lines += ["", "### Dormant cooperation (revoked or pending)"]
+    if dormant:
+        lines += ["", "| Source | Target | Status | Reason |", "|--------|--------|--------|--------|"]
+        for p in dormant:
+            lines.append(f"| `{p['source']}` | `{p['target']}` | {p['approval']} | — |")
+    else:
+        lines.append("\n_None — all pairs are active._")
+
+    lines += ["", "### Rollback", "", "To reset all runtime overrides: call `cooperation.rollback()`. Restores policy file defaults atomically."]
+    return "\n".join(lines)
+
+
+def _execution_workflows_md(facts: Dict[str, Any]) -> str:
+    lines = []
     observers = facts["observers"]
-    audio = facts["audio_listeners"]
-    if not observers and not audio:
-        return None
-
+    robots = facts["robots"]
     profile = facts["active_profile"]
-    forbidden = facts["forbidden_actions"]
-
-    roles: List[Dict[str, Any]] = []
-    nodes: List[Dict[str, Any]] = []
-    edges: List[Dict[str, Any]] = []
 
     locals_ = [n for n in observers if _node_role(n) == "robot_local_view"]
     externals = [n for n in observers if _node_role(n) == "external_view"]
 
-    if locals_:
-        roles.append({"role_id": "robot_local_view",
-                      "description": "Ego/first-person view from a robot-mounted sensor.",
-                      "required_capabilities": ["observe"],
-                      "preferred_nodes": [n["id"] for n in locals_],
-                      "minimum": 0, "maximum": 9999})
-    if externals:
-        roles.append({"role_id": "external_view",
-                      "description": "Third-person view from an external camera.",
-                      "required_capabilities": ["observe"],
-                      "preferred_nodes": [n["id"] for n in externals],
-                      "minimum": 0, "maximum": 9999})
-    if audio:
-        roles.append({"role_id": "audio_input",
-                      "description": "Microphone for audio capture (capture only, never output).",
-                      "required_capabilities": ["listen"],
-                      "preferred_nodes": [n["id"] for n in audio],
-                      "minimum": 0, "maximum": 9999})
-    roles.append({"role_id": "perception_model",
-                  "description": "Runtime-provided VLM/perception model.",
-                  "required_capabilities": ["image_understanding"],
-                  "minimum": 1, "maximum": 1})
+    # Workflow 1: Observation
+    if observers:
+        lines.append("### Workflow: Scene observation")
+        step = 1
+        if locals_ and externals:
+            lines.append(f"{step}. [parallel] `capture_frame` → `{locals_[0]['id']}` ({_proto(locals_[0])}, ~200ms)")
+            step += 1
+            lines.append(f"{step}. [parallel] `capture_frame` → `{externals[0]['id']}` ({_proto(externals[0])}, ~100ms)")
+            step += 1
+        elif observers:
+            lines.append(f"{step}. [serial] `capture_frame` → `{observers[0]['id']}` ({_proto(observers[0])}, ~200ms)")
+            step += 1
+        lines.append(f"{step}. [serial] send frames → `perception_vision` (local, ~2000ms)")
+        step += 1
+        lines.append(f"{step}. [serial] return description → `llm_planner`")
+        lines.append("")
 
-    for n in observers:
-        nodes.append({"id": n["id"], "role": _node_role(n), "node_type": n["node_type"],
-                      "required_capabilities": ["observe"]})
-        edges.append({"source": n["id"], "target": "perception_vision", "edge_type": "observation_stream"})
-    for n in audio:
-        if not any(x["id"] == n["id"] for x in nodes):
-            nodes.append({"id": n["id"], "role": "audio_input", "node_type": n["node_type"],
-                          "required_capabilities": ["listen"]})
-    nodes.append({"id": "perception_vision", "role": "perception_model",
-                  "node_type": "perception_model", "required_capabilities": ["image_understanding"]})
+    # Workflow 2: Motion (if not forbidden)
+    if robots and "motion" not in profile["forbidden_classes"]:
+        lines.append("### Workflow: Motion with confirmation")
+        lines.append("1. [serial] `llm_planner` → `request_approval` → `human_operator`")
+        lines.append("2. [conditional: approved] send `motion_command` → `" + robots[0]["id"] + "` (http, ~50ms)")
+        lines.append("3. [conditional: denied] report denial, suggest alternative")
+        lines.append("4. [serial] monitor via observers during motion")
+        lines.append("")
 
-    # Readiness checks depend on profile
-    readiness = ["all_required_nodes_exist", "required_capabilities_are_safe",
-                 "sensor_artifacts_available_or_capture_allowed", "no_forbidden_action_in_task"]
-    if "motion" in profile["confirmation_classes"] or "motion" in profile["supervisor_classes"]:
-        readiness.append("user_confirmed_motion_in_scope")
-    if "manipulation" in profile["supervisor_classes"]:
-        readiness.append("supervisor_signoff_obtained")
-    if audio:
-        readiness.append("audio_rms_non_zero_or_explicitly_unverified")
+    # Workflow 3: Health check
+    hardware = [n for n in facts["included_nodes"] if n["participant_type"] != "agent_node"]
+    if hardware:
+        lines.append("### Workflow: Health audit")
+        lines.append(f"1. [parallel] `health_check` → all {len(hardware)} hardware nodes (~100ms each)")
+        lines.append("2. [serial] aggregate results → `llm_planner`")
+        lines.append("3. [serial] report status to user")
+        lines.append("")
 
-    return {
-        "schema": SCHEMA_GRAPH,
-        "graph_id": "observation",
-        "name": f"Observation Graph ({profile['name']} profile)",
-        "intent": "Observe and describe the environment using available sensors and actuators, within the active safety profile.",
-        "safety_level": profile["name"],
-        "active_safety_profile": profile["name"],
-        "roles": roles,
-        "nodes": nodes,
-        "edges": edges,
-        "constraints": {
-            "allow_motion": "motion" not in profile["forbidden_classes"],
-            "allow_manipulation": "manipulation" not in profile["forbidden_classes"],
-            "allow_audio_output": "audio_output" not in profile["forbidden_classes"],
-            "forbidden_actions": forbidden,
-        },
-        "readiness_checks": readiness,
-        "failure_modes": [
-            {"id": "node_missing", "when": "required node id not in topology", "attribution": "topology"},
-            {"id": "node_offline", "when": "adapter/endpoint unreachable", "attribution": "hardware"},
-            {"id": "capability_missing", "when": "node lacks a required capability", "attribution": "configuration"},
-            {"id": "forbidden_action_requested", "when": "task action is in forbidden_actions for active profile", "attribution": "planner"},
-            {"id": "sensor_artifact_missing", "when": "frame/audio file not produced", "attribution": "sensor"},
-            {"id": "missing_confirmation", "when": "motion/manipulation planned without prior user confirmation", "attribution": "planner"},
-            {"id": "unverified_audio_pickup", "when": "audio captured but RMS=0 or speech absent", "attribution": "sensor"},
-        ],
-        "recovery": {
-            "auto_allowed": ["retry_passive_health_check", "choose_alternate_observer", "downgrade_multiview_to_single_view"],
-            "requires_confirmation": sorted((profile["confirmation_classes"] | profile["supervisor_classes"]) or {"any_motion"}),
-            "not_recoverable": ["missing_capable_executor"],
-        },
-        "outputs": ["scene_description"]
-                    + (["motion_trace"] if "motion" in (profile["confirmation_classes"] | profile["supervisor_classes"]) else [])
-                    + (["manipulation_trace"] if "manipulation" in (profile["supervisor_classes"]) else [])
-                    + (["audio_pickup_status"] if audio else [])
-                    + ["sensor_readiness_report", "failure_attribution", "episode_trace"],
+    return "\n".join(lines) if lines else "_No workflows available._"
+
+
+def _proto(n: Dict[str, Any]) -> str:
+    return "http" if n.get("endpoint") else "local"
+
+
+def _frontmatter(facts: Dict[str, Any], workflows: List[Dict[str, Any]]) -> str:
+    fm = {
+        "name": facts["package_id"],
+        "description": (
+            f"Embodiment context for {len(facts['included_nodes'])} node(s). "
+            f"Active profile: {facts['active_profile']['name']}."
+        ),
+        "version": "0.4.0",
+        "kind": "embodiment_context",
+        "active_safety_profile": facts["active_profile"]["name"],
+        "workflows": [w["id"] for w in workflows],
     }
+    return "---\n" + yaml.safe_dump(fm, sort_keys=False, allow_unicode=True).rstrip() + "\n---\n"
 
 
-def _registry_inline(included: List[Dict[str, Any]]) -> Dict[str, Any]:
-    return {
-        "schema": SCHEMA_REGISTRY,
-        "nodes": [
-            {
-                "id": n["id"],
-                "name": n.get("name"),
-                "node_type": n["node_type"],
-                "role": _node_role(n),
-                "all_capabilities": n.get("all_capabilities") or [],
-                "safe_capabilities": n.get("safe_capabilities") or [],
-                "sensors": n.get("sensors") or [],
-                "limits": n.get("limits") or {},
-                "standalone_only": n.get("standalone_only", False),
-                "endpoint_configured": bool(n.get("endpoint")),
-                "real_device": n.get("real_device", False),
-                "parent_robot": n.get("parent_robot"),
-            }
-            for n in included
-        ],
-    }
-
-
-# ── Deterministic EMBODIMENT.md ───────────────────────────────────────────────
-
-def _cap_table_md(n: Dict[str, Any]) -> str:
-    table = n.get("capability_table") or {}
-    if not table:
-        return "  _(no capabilities declared)_"
-    rows = ["  | capability | class | active profile status |",
-            "  |---|---|---|"]
-    for cap, info in sorted(table.items()):
-        rows.append(f"  | `{cap}` | `{info['class']}` | `{info['status']}` |")
-    return "\n".join(rows)
-
-
-def _node_block(n: Dict[str, Any]) -> str:
+def _node_block_v3(n: Dict[str, Any]) -> str:
     role = _node_role(n)
-    lines = [
-        f"### `{n['id']}` — {n.get('name') or n['id']}",
-        f"- Type: `{n['node_type']}` · Role: `{role}`",
-    ]
+    lines = [f"### `{n['id']}` — {n.get('name') or n['id']}"]
+    lines.append(f"- Type: `{n['node_type']}` · Participant: `{n.get('participant_type', 'unknown')}` · Role: `{role}`")
+    if n.get("agent_subtype"):
+        lines.append(f"- Agent subtype: `{n['agent_subtype']}`")
     if n.get("sensors"):
         lines.append(f"- Sensors: `{', '.join(n['sensors'])}`")
-    if n.get("limits"):
+    if n.get("limits") and any(v for v in n["limits"].values()):
         lines.append(f"- Limits: `{json.dumps(n['limits'], ensure_ascii=False)}`")
     if n.get("image_path"):
         lines.append(f"- Last sensor artifact: `{n['image_path']}`")
@@ -408,312 +627,191 @@ def _node_block(n: Dict[str, Any]) -> str:
         rms = n["last_rms"]
         tag = "verified" if rms not in (0, None) else "unverified (RMS=0)"
         lines.append(f"- Last audio RMS: `{rms}` ({tag})")
-    if n.get("evidence_excerpt"):
-        first = n["evidence_excerpt"].splitlines()[0].strip() if n["evidence_excerpt"].splitlines() else ""
-        if first:
-            lines.append(f"- Profile note: {first}")
-    lines.append("\n  Capability status under active profile:\n")
-    lines.append(_cap_table_md(n))
+    safe = n.get("safe_capabilities") or []
+    if safe:
+        lines.append(f"- Safe capabilities: `{', '.join(safe)}`")
     return "\n".join(lines)
 
 
 def _profile_summary_md(facts: Dict[str, Any]) -> str:
     p = facts["active_profile"]
-    forbidden = facts["forbidden_actions"]
     lines = [
         f"Active profile: **`{p['name']}`** — {p['description'].strip()}",
         "",
         "| class | behavior under this profile |",
         "|---|---|",
     ]
-    for cls, behavior in [
-        ("safe", "plan freely"),
-        ("motion", "requires confirmation" if "motion" in p["confirmation_classes"] else ("requires supervisor" if "motion" in p["supervisor_classes"] else "**forbidden**")),
-        ("manipulation", "requires confirmation" if "manipulation" in p["confirmation_classes"] else ("requires supervisor" if "manipulation" in p["supervisor_classes"] else "**forbidden**")),
-        ("audio_output", "requires confirmation" if "audio_output" in p["confirmation_classes"] else ("requires supervisor" if "audio_output" in p["supervisor_classes"] else "**forbidden**")),
-    ]:
+    for cls in ["safe", "motion", "manipulation", "audio_output"]:
+        if cls in p["forbidden_classes"]:
+            behavior = "**forbidden**"
+        elif cls in p["supervisor_classes"]:
+            behavior = "requires supervisor + confirmation"
+        elif cls in p["confirmation_classes"]:
+            behavior = "requires confirmation"
+        elif cls in p["allowed_classes"]:
+            behavior = "plan freely"
+        else:
+            behavior = "requires confirmation"
         lines.append(f"| `{cls}` | {behavior} |")
-    if forbidden:
-        lines += ["", "Forbidden actions under this profile:",
-                  "```text", *forbidden, "```"]
     return "\n".join(lines)
 
 
-def _profile_override_md(facts: Dict[str, Any]) -> str:
-    profile_name = facts["active_profile"]["name"]
-    lines = ["The user can change the safety profile at prompt time. Available profiles:",
-             ""]
-    # Add info about other profiles
-    profile_to_rules = {
-        "sensor_only": "Locomotion + manipulation + audio_output forbidden. Read-only.",
-        "motion_supervised": "Locomotion enabled with confirmation. Manipulation forbidden. Good for mobile inspection.",
-        "full_humanoid": "All capabilities available. Motion requires confirmation. Manipulation requires confirmation + supervisor.",
-    }
-    for pname, desc in profile_to_rules.items():
-        marker = " ← current" if pname == profile_name else ""
-        lines.append(f"- **`{pname}`**: {desc}{marker}")
+def _workflow_selection_md(workflows: List[Dict[str, Any]]) -> str:
+    lines = ["The agent selects the appropriate workflow by matching user intent to trigger keywords:", ""]
+    lines.append("| Workflow ID | Intent | Trigger Keywords |")
+    lines.append("|-------------|--------|------------------|")
+    for w in workflows:
+        kw = ", ".join(w.get("trigger_keywords", [])[:5])
+        lines.append(f"| `{w['id']}` | {w['description'][:80]} | {kw} |")
     return "\n".join(lines)
 
 
-def _worked_examples_md(facts: Dict[str, Any]) -> str:
+def _deterministic_md_v3(facts: Dict[str, Any], workflows: List[Dict[str, Any]], coop_state: Dict[str, Any]) -> str:
+    nodes_block = "\n\n".join(_node_block_v3(n) for n in facts["included_nodes"]) or "_No eligible nodes._"
     profile = facts["active_profile"]
-    included = facts["included_nodes"]
     observers = facts["observers"]
-    audio = facts["audio_listeners"]
     robots = facts["robots"]
-
     locals_ = [n for n in observers if _node_role(n) == "robot_local_view"]
     externals = [n for n in observers if _node_role(n) == "external_view"]
 
-    examples: List[str] = []
-
-    # Always: describe workspace
+    # Worked examples
+    examples = []
     if locals_ and externals:
         examples.append(
-            f'- *User*: "Describe the workspace."\n'
-            f'  *Plan*: capture frames from `{locals_[0]["id"]}` (ego) and `{externals[0]["id"]}` (third-person); send to `perception_vision`; return dual-view description. No motion required.'
+            f'1. "Describe the workspace from both angles."\n'
+            f'   → Select workflow `scene_observation`. Call `{locals_[0]["id"]}.capture_frame` and '
+            f'`{externals[0]["id"]}.capture_frame` in parallel. Send both to `perception_vision.describe_scene`. Return fused description.'
         )
     elif observers:
         examples.append(
-            f'- *User*: "What do you see?"\n'
-            f'  *Plan*: capture one frame from `{observers[0]["id"]}`; describe to user.'
+            f'1. "What do you see?"\n'
+            f'   → Select workflow `scene_observation`. Call `{observers[0]["id"]}.capture_frame`. Describe result.'
         )
-
-    # Audio check
-    if audio:
-        rms = audio[0].get("last_rms")
-        rms_note = ""
-        if rms in (0, None):
-            rms_note = " Tag `unverified_audio_pickup` if RMS stays zero."
+    if robots and "motion" not in profile["forbidden_classes"]:
         examples.append(
-            f'- *User*: "Is the microphone working?"\n'
-            f'  *Plan*: record 1–2 s on `{audio[0]["id"]}`; report RMS.{rms_note}'
+            f'{len(examples)+1}. "Walk forward 1 meter."\n'
+            f'   → Select workflow `motion_with_confirmation`. Call `human_operator.request_approval(action="walk 1m forward")`. '
+            f'If approved, dispatch motion command to `{robots[0]["id"]}`. Monitor via observers.'
         )
-
-    # Motion example
-    if robots:
-        if "motion" in profile["forbidden_classes"]:
-            examples.append(
-                f'- *User*: "Walk forward 1 meter."\n'
-                f'  *Plan*: **refuse** — `walk` is forbidden under the `{profile["name"]}` profile. '
-                f'Tell the user to switch to `motion_supervised` profile and try again.'
-            )
-        elif "motion" in profile["confirmation_classes"]:
-            examples.append(
-                f'- *User*: "Walk forward 1 meter."\n'
-                f'  *Plan*: ask user to confirm ("Confirm: G1 will walk 1 m forward. Proceed?"). '
-                f'If confirmed, plan `walk` with `{robots[0]["id"]}`; run obstacle_check and floor_clear readiness first.'
-            )
-
-    # Manipulation example
-    if robots:
-        if "manipulation" in profile["forbidden_classes"]:
-            examples.append(
-                f'- *User*: "Pick up the cup."\n'
-                f'  *Plan*: **refuse** — `pick` is forbidden under the `{profile["name"]}` profile. '
-                f'Tell the user to switch to `full_humanoid` profile (which requires supervisor signoff) and try again.'
-            )
-        elif "manipulation" in profile["supervisor_classes"]:
-            examples.append(
-                f'- *User*: "Pick up the cup."\n'
-                f'  *Plan*: require user confirmation AND supervisor signoff. State: "This requires supervisor sign-off in addition to your confirmation." '
-                f'If both obtained, plan `grasp`+`pick` with `{robots[0]["id"]}` after object_identified and grasp_plan_verified readiness checks.'
-            )
-
-    # G1 + camera collaboration
-    if locals_ and externals:
+    elif robots:
         examples.append(
-            f'- *User*: "Describe what the robot sees compared to the external camera."\n'
-            f'  *Plan*: run `observation` graph; assign `{locals_[0]["id"]}` to `robot_local_view` role, `{externals[0]["id"]}` to `external_view`, `perception_vision` to `perception_model`. Return fused dual-view description.'
+            f'{len(examples)+1}. "Walk forward 1 meter."\n'
+            f'   → **REFUSE** — `walk` is forbidden under `{profile["name"]}`. Suggest switching to `motion_supervised` profile.'
         )
+    examples.append(
+        f'{len(examples)+1}. "Check if all sensors are online."\n'
+        f'   → Select workflow `sensor_health_audit`. Call `health_check` on all hardware nodes in parallel. Report status.'
+    )
 
-    return "\n\n".join(examples)
-
-
-def _frontmatter(facts: Dict[str, Any], graph_id: Optional[str]) -> str:
-    fm = {
-        "name": facts["package_id"],
-        "description": (
-            f"Embodiment context for {len(facts['included_nodes'])} device(s). "
-            f"Active profile: {facts['active_profile']['name']}. "
-            "Switch profile or constrain via prompt to change allowed actions."
-        ),
-        "version": "0.3.0",
-        "kind": "embodiment_context",
-        "active_safety_profile": facts["active_profile"]["name"],
-        "primary_graph": graph_id or "none",
-    }
-    return "---\n" + yaml.safe_dump(fm, sort_keys=False, allow_unicode=True).rstrip() + "\n---\n"
-
-
-def _deterministic_md(facts: Dict[str, Any], graph: Optional[Dict[str, Any]]) -> str:
-    graph_id = graph["graph_id"] if graph else None
-    nodes_block = "\n\n".join(_node_block(n) for n in facts["included_nodes"]) or "_No eligible nodes._"
-
-    return (
-        _frontmatter(facts, graph_id)
+    md = (
+        _frontmatter(facts, workflows)
         + f"\n# {facts['title']}\n\n"
-        "This file is the agent's primary instruction for this embodiment context. "
-        "Read it the way you would read a `SKILL.md`. "
-        "It describes the **full capability set** of available hardware and how to plan with it safely.\n\n"
+        "This is the agent's primary instruction for this embodiment context. "
+        "Read it like a `SKILL.md`. It describes available hardware, software agents, "
+        "their tool interfaces, cooperation boundaries, and execution workflows.\n\n"
 
-        "## When to use this embodiment\n\n"
-        f"Use this when the task involves {len(facts['included_nodes'])} real device(s) listed below. "
-        "This is real hardware — never substitute a mock node for a missing real one.\n\n"
+        "## When to use\n\n"
+        f"Use when the task involves the {len(facts['included_nodes'])} node(s) listed below. "
+        "This is real hardware and real agent infrastructure — never substitute mocks.\n\n"
 
-        "## When not to use this embodiment\n\n"
-        "Do not use this embodiment for tasks that require capabilities not present in the device registry, "
-        "or when a device is offline and no valid fallback exists.\n\n"
+        "## When not to use\n\n"
+        "Do not use for tasks requiring capabilities absent from the registry, "
+        "when critical nodes are offline with no fallback, or when all cooperation paths to a target are dormant.\n\n"
 
         "## Active safety profile\n\n"
         f"{_profile_summary_md(facts)}\n\n"
 
-        "## Changing the safety profile\n\n"
-        f"{_profile_override_md(facts)}\n\n"
-
         "## Available nodes\n\n"
         f"{nodes_block}\n\n"
 
+        "## Tool interfaces\n\n"
+        f"{_tool_interface_md(facts['included_nodes'])}\n\n"
+
+        "## Cooperation boundaries\n\n"
+        f"{_cooperation_boundaries_md(coop_state)}\n\n"
+
+        "## Execution workflows\n\n"
+        f"{_execution_workflows_md(facts)}\n\n"
+
         "## How to plan\n\n"
-        + (f"The primary graph is `{graph_id}` (inlined in `embodiment.yaml > graphs[0]`).\n\n" if graph_id else "")
-        + "Worked examples mapping user requests to plans:\n\n"
-        f"{_worked_examples_md(facts)}\n\n"
-        "Planning rules:\n\n"
-        "1. Check the active safety profile before planning any non-safe-class action.\n"
-        "2. For motion-class actions: obtain explicit user confirmation in the current conversation scope.\n"
-        "3. For manipulation-class actions: obtain confirmation + supervisor signoff before proceeding.\n"
-        "4. Do not invent capabilities not in the node registry.\n"
-        "5. Do not proceed past a failed readiness check.\n"
-        "6. Report results tagged with any `unverified_*` codes where evidence is absent.\n\n"
+        f"{_workflow_selection_md(workflows)}\n\n"
+        "### Worked examples\n\n"
+        + "\n\n".join(examples) + "\n\n"
+        "### Planning rules\n\n"
+        "1. Match user intent to workflow via `trigger_keywords`.\n"
+        "2. Check cooperation boundaries — do not plan through dormant edges.\n"
+        "3. Check safety profile before any non-safe action.\n"
+        "4. For confirmation-class actions: route through `human_operator.request_approval`.\n"
+        "5. Do not invent capabilities not in the registry.\n"
+        "6. Use tool interfaces for concrete execution — generate actual tool calls.\n\n"
 
         "## Forbidden actions\n\n"
-        "Under the **active profile**, these actions must not be planned or executed:\n\n"
-        + ("```text\n" + "\n".join(facts["forbidden_actions"]) + "\n```\n" if facts["forbidden_actions"] else "_None forbidden under this profile. Confirm + supervisor rules still apply to motion/manipulation._")
-        + "\n\nIf the user requests a forbidden action, refuse and explain which profile would allow it.\n\n"
+        + ("```text\n" + "\n".join(facts["forbidden_actions"]) + "\n```\n" if facts["forbidden_actions"] else "_None forbidden under this profile._")
+        + "\n\n"
 
         "## Failure modes\n\n"
         "| Code | When it fires | Attribution |\n"
         "|---|---|---|\n"
         "| `node_missing` | Required node not in topology | topology |\n"
         "| `node_offline` | Node unreachable | hardware |\n"
-        "| `capability_missing` | Node lacks required capability | configuration |\n"
-        "| `forbidden_action_requested` | Task action is forbidden under active profile | planner |\n"
-        "| `missing_confirmation` | Motion/manipulation planned without prior confirmation | planner |\n"
-        "| `sensor_artifact_missing` | Frame/audio file not produced | sensor |\n"
-        "| `unverified_audio_pickup` | Audio captured but RMS=0 | sensor |\n\n"
+        "| `cooperation_denied` | Edge is dormant (cooperation revoked) | cooperation_policy |\n"
+        "| `forbidden_action_requested` | Action forbidden under active profile | planner |\n"
+        "| `approval_timeout` | Human did not respond | human_operator |\n"
+        "| `sensor_artifact_missing` | Frame/audio not produced | sensor |\n\n"
 
         "## Recovery\n\n"
-        "Auto-recovery:\n\n"
-        "- retry passive health check;\n"
-        "- choose alternate observer;\n"
-        "- downgrade multi-view to single-view.\n\n"
-        "Requires explicit confirmation:\n\n"
-        + "".join(f"- `{cls}`;\n" for cls in sorted(facts["active_profile"]["confirmation_classes"] | facts["active_profile"]["supervisor_classes"]))
-        + (f"- any motion, any manipulation, audio output (default if no profile specified).\n" if not (facts["active_profile"]["confirmation_classes"] | facts["active_profile"]["supervisor_classes"]) else "")
-        + "\nNot recoverable:\n\n"
-        "- requests for a capability class that is forbidden under the active profile and the user refuses to switch profiles.\n\n"
+        "**Auto-recovery**: retry health check, choose alternate observer, downgrade multi-view, use alternate non-dormant path.\n\n"
+        "**Requires confirmation**: " + ", ".join(sorted(profile["confirmation_classes"] | profile["supervisor_classes"]) or ["motion", "manipulation"]) + ".\n\n"
+        "**Not recoverable**: missing executor, all cooperation paths dormant.\n\n"
 
         "## Runtime integration\n\n"
-        "1. Parse this `EMBODIMENT.md` as planner-grounding context.\n"
-        "2. Read `embodiment.yaml > registry.nodes` for the full device registry.\n"
-        "3. Read `embodiment.yaml > graphs[0]` for the primary observation graph.\n"
-        "4. Read `embodiment.yaml > safety.active_safety_profile` to confirm the active profile.\n"
-        "5. Enforce the profile at the executor — check `forbidden_actions` + `requires_confirmation` before dispatch.\n"
-        "6. Surface all failure codes verbatim in episode traces.\n"
+        "1. Mount this package via the agent system's embodiment loader.\n"
+        "2. Context: inject this `EMBODIMENT.md` into the agent's planning context.\n"
+        "3. Tools: register all `tool_interface.operations` (non-forbidden) as callable tools.\n"
+        "4. Cooperation: enforce cooperation boundaries before tool dispatch.\n"
+        "5. Safety: check `forbidden_actions` + `requires_confirmation` at the executor.\n"
+        "6. Rollback: `cooperation.rollback()` resets to policy file defaults.\n"
     )
+    return md
 
 
-# ── LLM compose ───────────────────────────────────────────────────────────────
+# ── LLM Enhancement (Optional, Prose-Only) ──────────────────────────────────
 
 LLM_SYSTEM = (
-    "You write SKILL.md-style embodiment context documents for a topology-based robot agent runtime.\n"
-    "You MUST stay grounded in the structured facts provided. You MUST NOT:\n"
-    " - invent capabilities not listed per node;\n"
+    "You enhance the prose quality of an embodiment context document. "
+    "You receive a complete, structurally correct EMBODIMENT.md and improve its readability. "
+    "You MUST NOT:\n"
+    " - add, remove, or reorder sections;\n"
+    " - invent capabilities not in the tool interfaces;\n"
     " - remove or rephrase any forbidden_action entry;\n"
-    " - claim verified evidence absent from the facts;\n"
-    " - turn a forbidden-class action into a safe action.\n"
-    "Describe the FULL capability set of each node, including motion and manipulation, "
-    "but clearly indicate which safety class each belongs to and what the active profile requires.\n"
-    "Be concrete. Use real node ids. Show worked examples for sensor-only tasks AND motion/manipulation tasks.\n"
-    "Output: one Markdown document with YAML frontmatter."
+    " - alter cooperation boundaries or workflow steps;\n"
+    " - change YAML frontmatter.\n"
+    "Only improve descriptions, add helpful context to worked examples, "
+    "and make the language clearer for an LLM agent reader."
 )
 
-REQUIRED_SECTIONS = [
-    "When to use",
-    "When not to use",
-    "Active safety profile",
-    "Available nodes",
-    "How to plan",
-    "Forbidden actions",
-    "Failure modes",
-    "Recovery",
-    "Runtime integration",
-]
-
-PROMOTION_PHRASES = [
-    "can navigate freely", "can walk freely", "can grasp freely",
-    "is safe to move without", "may walk without confirmation", "may grasp without confirmation",
-    "manipulation is unrestricted",
+REQUIRED_SECTIONS_V3 = [
+    "When to use", "When not to use", "Active safety profile",
+    "Available nodes", "Tool interfaces", "Cooperation boundaries",
+    "Execution workflows", "How to plan", "Forbidden actions",
+    "Failure modes", "Recovery", "Runtime integration",
 ]
 
 
-def _llm_user_prompt(facts: Dict[str, Any], graph: Optional[Dict[str, Any]]) -> str:
-    fm = {
-        "name": facts["package_id"],
-        "description": f"Embodiment context for {len(facts['included_nodes'])} device(s). Active profile: {facts['active_profile']['name']}.",
-        "version": "0.3.0",
-        "kind": "embodiment_context",
-        "active_safety_profile": facts["active_profile"]["name"],
-        "primary_graph": graph["graph_id"] if graph else "none",
-    }
-    nodes_for_llm = [
-        {
-            "id": n["id"],
-            "name": n.get("name"),
-            "node_type": n["node_type"],
-            "role": _node_role(n),
-            "all_capabilities": n.get("all_capabilities") or [],
-            "safe_capabilities": n.get("safe_capabilities") or [],
-            "capability_table": n.get("capability_table") or {},
-            "sensors": n.get("sensors") or [],
-            "limits": n.get("limits") or {},
-            "real_device": n.get("real_device"),
-            "image_path": n.get("image_path"),
-            "last_rms": n.get("last_rms"),
-            "evidence_excerpt": (n.get("evidence_excerpt") or "")[:600],
-        }
-        for n in facts["included_nodes"]
-    ]
-    facts_block = {
-        "frontmatter_to_emit_verbatim": fm,
-        "title": facts["title"],
-        "active_profile": {
-            "name": facts["active_profile"]["name"],
-            "description": facts["active_profile"]["description"],
-            "forbidden_classes": sorted(facts["active_profile"]["forbidden_classes"]),
-            "confirmation_classes": sorted(facts["active_profile"]["confirmation_classes"]),
-            "supervisor_classes": sorted(facts["active_profile"]["supervisor_classes"]),
-        },
-        "forbidden_actions_verbatim": facts["forbidden_actions"],
-        "nodes": nodes_for_llm,
-        "primary_graph": {"graph_id": graph["graph_id"], "intent": graph["intent"]} if graph else None,
-        "required_sections_in_order": REQUIRED_SECTIONS,
-        "required_examples": [
-            "describe workspace (sensor/observe task)",
-            "walk/navigate task (show confirmation requirement OR refusal with profile switch suggestion)",
-            "pick/grasp task (show supervisor requirement OR refusal with profile switch suggestion)",
-            "G1 + external camera collaboration (if both exist)",
-        ],
-    }
-    return (
-        "Compose EMBODIMENT.md from the structured facts below. "
-        "Emit frontmatter exactly as `frontmatter_to_emit_verbatim`. "
-        "Describe the FULL capability space of each node — including motion and manipulation — "
-        "clearly tagged with their safety class and active profile status. "
-        "Show how the user can change the profile at prompt time. "
-        f"In `## Forbidden actions`, list every entry from `forbidden_actions_verbatim` verbatim in a fenced ```text``` block.\n\n"
-        f"FACTS:\n```json\n{json.dumps(facts_block, ensure_ascii=False, indent=2)}\n```\n"
-    )
+def _validate_md_v3(text: str, facts: Dict[str, Any]) -> List[str]:
+    reasons: List[str] = []
+    for sec in REQUIRED_SECTIONS_V3:
+        if sec not in text:
+            reasons.append(f"missing_section:{sec}")
+    for action in facts["forbidden_actions"]:
+        if not re.search(rf"\b{re.escape(action)}\b", text):
+            reasons.append(f"forbidden_action_dropped:{action}")
+    if not text.lstrip().startswith("---"):
+        reasons.append("missing_yaml_frontmatter")
+    for n in facts["included_nodes"]:
+        if n["id"] not in text:
+            reasons.append(f"missing_node_id:{n['id']}")
+    return reasons
 
 
 def _load_llm_config(path: Path) -> Dict[str, Any]:
@@ -746,60 +844,55 @@ def _llm_call(cfg: Dict[str, Any], system: str, user: str, timeout: int = 120) -
     return (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
 
 
-def _validate_md(text: str, facts: Dict[str, Any]) -> List[str]:
-    reasons: List[str] = []
-    for sec in REQUIRED_SECTIONS:
-        if sec not in text:
-            reasons.append(f"missing_section:{sec}")
-    for action in facts["forbidden_actions"]:
-        if not re.search(rf"\b{re.escape(action)}\b", text):
-            reasons.append(f"forbidden_action_dropped:{action}")
-    lower = text.lower()
-    for phrase in PROMOTION_PHRASES:
-        if phrase in lower:
-            reasons.append(f"unsafe_promotion:{phrase}")
-    if not text.lstrip().startswith("---"):
-        reasons.append("missing_yaml_frontmatter")
-    for n in facts["included_nodes"]:
-        if n["id"] not in text:
-            reasons.append(f"missing_node_id:{n['id']}")
-    return reasons
+# ── Package Assembly ─────────────────────────────────────────────────────────
 
+def _embodiment_yaml(facts: Dict[str, Any], workflows: List[Dict[str, Any]],
+                     registry: Dict[str, Any], coop_state: Dict[str, Any],
+                     schema_version: str = "v3") -> Dict[str, Any]:
+    profile = facts["active_profile"]
+    schema = SCHEMA_PACKAGE if schema_version == "v3" else SCHEMA_PACKAGE_V2
 
-# ── Package assembly ──────────────────────────────────────────────────────────
-
-def _embodiment_yaml(facts: Dict[str, Any], graph: Optional[Dict[str, Any]],
-                     registry: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "schema": SCHEMA_PACKAGE,
+    pkg: Dict[str, Any] = {
+        "schema": schema,
         "package_id": facts["package_id"],
         "name": facts["title"],
-        "version": "0.3.0",
+        "version": "0.4.0",
         "kind": "embodiment_context",
         "license": "Apache-2.0",
-        "summary": f"Embodiment context. Active safety profile: {facts['active_profile']['name']}.",
+        "summary": f"Embodiment context. Profile: {profile['name']}.",
         "primary_agent_doc": "EMBODIMENT.md",
-        "active_safety_profile": facts["active_profile"]["name"],
+        "active_safety_profile": profile["name"],
         "registry": registry,
-        "graphs": [graph] if graph else [],
+        "cooperation_network": {
+            "policy_ref": coop_state.get("policy_ref", "policies/default_cooperation_policy.yaml"),
+            "default_approval": coop_state.get("default_approval", "approved"),
+            "runtime_override_enabled": True,
+            "rollback_target": "policy_file",
+        },
+        "workflows": workflows,
         "safety": {
-            "active_safety_profile": facts["active_profile"]["name"],
+            "active_safety_profile": profile["name"],
             "default_policy": "sensor_only",
             "install_must_not_actuate": True,
-            "requires_confirmation_for": sorted(facts["active_profile"]["confirmation_classes"] | facts["active_profile"]["supervisor_classes"]) or ["any_motion", "any_manipulation", "audio_output"],
+            "requires_confirmation_for": sorted(profile["confirmation_classes"] | profile["supervisor_classes"]) or ["any_motion", "any_manipulation", "audio_output"],
             "forbidden_actions": facts["forbidden_actions"],
         },
         "integration": {
-            "exposes_agent_context": True,
-            "compatible_with": ["auwomo_physclaw", "openclaw_like_runtime"],
+            "capabilities": ["context_v3", "tools_v1", "cooperation_v1"],
+            "compatible_runtimes": ["codex>=0.4", "openclaw>=1.0", "auwomo_physclaw>=0.4"],
+            "context_injection": {"target": "system_prompt"},
+            "tool_registration": {"format": "openai_function", "auto_register": True, "respect_dormant": True},
         },
         "generated": {
             "by": "embodiment_context_composer",
+            "version": "0.4.0",
             "at": time.time(),
-            "safety_profile_used": facts["active_profile"]["name"],
+            "safety_profile_used": profile["name"],
+            "schema_version": schema_version,
             "skipped_standalone_nodes": [s["id"] for s in facts["skipped_standalone"]],
         },
     }
+    return pkg
 
 
 def _resolve_mode(mode: str, llm_config: Path) -> Tuple[str, Dict[str, Any]]:
@@ -814,27 +907,40 @@ def _resolve_mode(mode: str, llm_config: Path) -> Tuple[str, Dict[str, Any]]:
     return ("llm", cfg) if has_cfg else ("deterministic", {})
 
 
+# ── Main Compose Function ────────────────────────────────────────────────────
+
 def compose_and_write(snapshot: Dict[str, Any], policy: Dict[str, Any],
                       package_id: str, title: str, out_root: Path,
                       mode: str, llm_config: Path,
+                      cooperation_policy_path: Optional[Path] = None,
                       standalone_overrides: Optional[Set[str]] = None,
-                      safety_profile_name: Optional[str] = None) -> Dict[str, Any]:
+                      safety_profile_name: Optional[str] = None,
+                      include_agent_nodes: bool = True,
+                      schema_version: str = "v3") -> Dict[str, Any]:
     class_map = _build_class_map(policy)
     profile_name = safety_profile_name or policy.get("default_safety_profile") or "sensor_only"
     active_profile = _build_profile(policy, profile_name)
+
     facts = _facts(snapshot, policy, package_id, title, active_profile, class_map,
-                   standalone_overrides=standalone_overrides)
-    graph = _primary_graph(facts)
+                   standalone_overrides=standalone_overrides,
+                   include_agent_nodes=include_agent_nodes)
+
+    coop_policy = _load_cooperation_policy(cooperation_policy_path)
+    coop_state = _resolve_cooperation(facts["included_nodes"], coop_policy)
+
+    workflows = _build_workflows(facts, coop_state)
     registry = _registry_inline(facts["included_nodes"])
+
     resolved_mode, cfg = _resolve_mode(mode, llm_config)
-    deterministic_md = _deterministic_md(facts, graph)
+    deterministic_md = _deterministic_md_v3(facts, workflows, coop_state)
     md = deterministic_md
     llm_status = "skipped"
     llm_rejection: List[str] = []
+
     if resolved_mode == "llm":
         try:
-            candidate = _llm_call(cfg, LLM_SYSTEM, _llm_user_prompt(facts, graph))
-            reasons = _validate_md(candidate, facts)
+            candidate = _llm_call(cfg, LLM_SYSTEM, f"Enhance this document:\n\n{deterministic_md}")
+            reasons = _validate_md_v3(candidate, facts)
             if not reasons:
                 md = candidate
                 llm_status = "accepted"
@@ -844,12 +950,19 @@ def compose_and_write(snapshot: Dict[str, Any], policy: Dict[str, Any],
         except Exception as exc:
             llm_status = f"error:{type(exc).__name__}"
             llm_rejection = [str(exc)]
+
     pkg_dir = out_root / package_id
     pkg_dir.mkdir(parents=True, exist_ok=True)
     (pkg_dir / "EMBODIMENT.md").write_text(md, encoding="utf-8")
     (pkg_dir / "embodiment.yaml").write_text(
-        yaml.safe_dump(_embodiment_yaml(facts, graph, registry), sort_keys=False, allow_unicode=True),
+        yaml.safe_dump(_embodiment_yaml(facts, workflows, registry, coop_state, schema_version),
+                       sort_keys=False, allow_unicode=True),
         encoding="utf-8")
+
+    if cooperation_policy_path and cooperation_policy_path.exists():
+        import shutil
+        shutil.copy2(cooperation_policy_path, pkg_dir / "cooperation_policy.yaml")
+
     if llm_status not in {"accepted", "skipped"}:
         (pkg_dir / "LLM_REJECTED.json").write_text(
             json.dumps({"status": llm_status, "reasons": llm_rejection,
@@ -857,6 +970,7 @@ def compose_and_write(snapshot: Dict[str, Any], policy: Dict[str, Any],
                         "api_key_masked": _mask_key(cfg.get("api_key"))},
                        ensure_ascii=False, indent=2),
             encoding="utf-8")
+
     return {
         "ok": True,
         "package_id": package_id,
@@ -865,22 +979,30 @@ def compose_and_write(snapshot: Dict[str, Any], policy: Dict[str, Any],
         "mode_resolved": resolved_mode,
         "llm_status": llm_status,
         "safety_profile": profile_name,
+        "schema_version": schema_version,
         "included_nodes": [n["id"] for n in facts["included_nodes"]],
         "skipped_standalone_nodes": [s["id"] for s in facts["skipped_standalone"]],
-        "graph_id": graph["graph_id"] if graph else None,
+        "workflows": [w["id"] for w in workflows],
+        "cooperation_default": coop_state.get("default_approval"),
         "files": ["EMBODIMENT.md", "embodiment.yaml"]
+                 + (["cooperation_policy.yaml"] if cooperation_policy_path else [])
                  + (["LLM_REJECTED.json"] if llm_status not in {"accepted", "skipped"} else []),
         "written": str(pkg_dir),
     }
 
 
+# ── CLI ──────────────────────────────────────────────────────────────────────
+
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Generate one agent-readable embodiment context package from topology.")
+    ap = argparse.ArgumentParser(description="Generate agent-readable embodiment context packages from topology (v3).")
     sub = ap.add_subparsers(dest="cmd", required=True)
+
     for name in ("preview", "generate"):
         p = sub.add_parser(name)
         p.add_argument("--topology", required=True)
         p.add_argument("--policy", default="embodiments/policies/default_safety_policy.yaml")
+        p.add_argument("--cooperation-policy", default=None,
+                       help="Path to cooperation policy YAML. Default: all pairs approved.")
         p.add_argument("--package-id", default="current_lab_sensor_context")
         p.add_argument("--title", default=None)
         p.add_argument("--out", default="embodiments/generated")
@@ -888,40 +1010,56 @@ def main(argv=None):
         p.add_argument("--llm-config", default="hub/copaw_config.json")
         p.add_argument("--safety-profile",
                        choices=["sensor_only", "motion_supervised", "full_humanoid"],
-                       default=None,
-                       help="Safety profile to apply. Default: policy's default_safety_profile (sensor_only).")
-        p.add_argument("--mark-standalone", action="append", default=[], metavar="NODE_ID",
-                       help="Mark a node as standalone_only at compose time (repeatable).")
+                       default=None)
+        p.add_argument("--schema-version", choices=["v2", "v3"], default="v3",
+                       help="Output schema version. v2 for backward compat, v3 for full two-layer graph.")
+        p.add_argument("--include-agent-nodes", action="store_true", default=True,
+                       help="Auto-inject llm_planner and human_operator agent nodes.")
+        p.add_argument("--no-agent-nodes", action="store_true", default=False,
+                       help="Do not inject agent nodes.")
+        p.add_argument("--mark-standalone", action="append", default=[], metavar="NODE_ID")
+
     args = ap.parse_args(argv)
     snapshot = _load_topology(Path(args.topology))
     policy = _load_yaml(Path(args.policy))
     title = args.title or args.package_id.replace("_", " ").title()
     pid = _slug(args.package_id)
     standalone_overrides = set(args.mark_standalone or [])
-    class_map = _build_class_map(policy)
-    profile_name = args.safety_profile or policy.get("default_safety_profile") or "sensor_only"
-    active_profile = _build_profile(policy, profile_name)
+    include_agents = not args.no_agent_nodes
+    coop_path = Path(args.cooperation_policy) if args.cooperation_policy else None
 
     if args.cmd == "preview":
-        facts = _facts(snapshot, policy, pid, title, active_profile, class_map, standalone_overrides=standalone_overrides)
-        graph = _primary_graph(facts)
+        class_map = _build_class_map(policy)
+        profile_name = args.safety_profile or policy.get("default_safety_profile") or "sensor_only"
+        active_profile = _build_profile(policy, profile_name)
+        facts = _facts(snapshot, policy, pid, title, active_profile, class_map,
+                       standalone_overrides=standalone_overrides, include_agent_nodes=include_agents)
+        coop_policy = _load_cooperation_policy(coop_path)
+        coop_state = _resolve_cooperation(facts["included_nodes"], coop_policy)
+        workflows = _build_workflows(facts, coop_state)
         resolved_mode, _ = _resolve_mode(args.mode, Path(args.llm_config))
         print(json.dumps({
             "ok": True, "package_id": pid, "title": title,
             "safety_profile": profile_name,
+            "schema_version": args.schema_version,
             "mode_requested": args.mode, "mode_resolved": resolved_mode,
             "included_nodes": [n["id"] for n in facts["included_nodes"]],
             "skipped_standalone_nodes": [s["id"] for s in facts["skipped_standalone"]],
-            "user_marked_standalone": sorted(standalone_overrides),
-            "graph_id": graph["graph_id"] if graph else None,
+            "workflows": [w["id"] for w in workflows],
+            "cooperation_default": coop_state.get("default_approval"),
             "forbidden_actions": facts["forbidden_actions"],
         }, ensure_ascii=False, indent=2))
         return 0
 
-    result = compose_and_write(snapshot, policy, pid, title, Path(args.out),
-                               mode=args.mode, llm_config=Path(args.llm_config),
-                               standalone_overrides=standalone_overrides,
-                               safety_profile_name=profile_name)
+    result = compose_and_write(
+        snapshot, policy, pid, title, Path(args.out),
+        mode=args.mode, llm_config=Path(args.llm_config),
+        cooperation_policy_path=coop_path,
+        standalone_overrides=standalone_overrides,
+        safety_profile_name=args.safety_profile,
+        include_agent_nodes=include_agents,
+        schema_version=args.schema_version,
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

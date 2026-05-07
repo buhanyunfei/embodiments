@@ -1,0 +1,36 @@
+# Embodiments configuration for agent systems.
+# Place this file in your agent system's config directory.
+# The EmbodimentLoader reads this to discover and activate packages.
+
+# Directories to scan for .embodiment.zip files or package dirs
+scan_dirs:
+  - ./embodiments/dist/
+  - ./embodiments/packages/
+
+# Packages to auto-activate on loader.discover()
+auto_activate:
+  - g1_usb_dual_view
+
+# Default cooperation policy (applied to packages that don't bundle their own)
+cooperation_policy: ./embodiments/policies/default_cooperation_policy.yaml
+
+# Tool output format: openai_function | anthropic_tool
+tool_format: openai_function
+
+# Hot-plug: allow new packages to be loaded at runtime
+hot_plug: true
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Portability bindings (deployment-specific, DO NOT commit to the package repo)
+# Maps hardware roles declared in each package's hardware_requirements to the
+# actual endpoints in your lab/deployment. Anyone who downloads the package
+# just fills in their own IPs here.
+# ──────────────────────────────────────────────────────────────────────────────
+bindings:
+  g1_usb_dual_view:
+    robot_local_view: http://192.168.1.100:8080   # G1 robot HTTP sensor API
+    external_view:    http://192.168.1.101:8081   # USB camera HTTP server
+
+  # Add entries for other packages as needed:
+  # my_other_package:
+  #   main_robot: http://10.0.0.50:8080

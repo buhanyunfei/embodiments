@@ -57,11 +57,12 @@ probes:
   passive: probes/passive_probe.py
   sensor: probes/sensor_probe.py
 registry:
-  schema: embodiment_node_registry/v1
+  schema: embodiment_node_registry/v2
   nodes:
     - id: usb_camera_real
       name: External USB Camera
       node_type: sensor
+      participant_type: sensor_node
       role: external_view
       safe_capabilities:
         - observe
@@ -72,9 +73,41 @@ registry:
         sensor_only: true
       standalone_only: false
       endpoint_configured: false
+      tool_interface:
+        protocol: http
+        endpoint: "@role:external_view"
+        operations:
+          - operation_id: capture_frame
+            description: "Capture a single frame from the USB camera"
+            method: POST
+            path: /sensors/capture
+            input_schema:
+              type: object
+              properties:
+                resolution: {type: string, enum: ["720p", "1080p"], default: "1080p"}
+                format: {type: string, enum: ["jpg", "png"], default: "jpg"}
+            output_schema:
+              type: object
+              properties:
+                frame_path: {type: string}
+                timestamp: {type: number}
+            latency_estimate_ms: 150
+            safety_class: safe
+          - operation_id: health_check
+            description: "Check USB camera connectivity"
+            method: GET
+            path: /health
+            input_schema: {}
+            output_schema:
+              type: object
+              properties:
+                status: {type: string}
+            latency_estimate_ms: 30
+            safety_class: safe
     - id: usb_mic_real
       name: External USB Microphone
       node_type: sensor
+      participant_type: sensor_node
       role: audio_input
       safe_capabilities:
         - listen
@@ -84,6 +117,62 @@ registry:
         sensor_only: true
       standalone_only: false
       endpoint_configured: false
+      tool_interface:
+        protocol: http
+        endpoint: "@role:audio_input"
+        operations:
+          - operation_id: record_audio
+            description: "Record a short audio clip from the USB microphone"
+            method: POST
+            path: /sensors/capture
+            input_schema:
+              type: object
+              properties:
+                duration_s: {type: number, default: 3.0}
+                format: {type: string, enum: ["wav", "mp3"], default: "wav"}
+            output_schema:
+              type: object
+              properties:
+                audio_path: {type: string}
+                duration_s: {type: number}
+                rms: {type: number}
+            latency_estimate_ms: 3200
+            safety_class: safe
+          - operation_id: health_check
+            description: "Check USB microphone connectivity"
+            method: GET
+            path: /health
+            input_schema: {}
+            output_schema:
+              type: object
+              properties:
+                status: {type: string}
+            latency_estimate_ms: 30
+            safety_class: safe
+
+hardware_requirements:
+  - role: external_view
+    description: "USB camera with HTTP capture API"
+    device_type: sensor_node
+    sensor_type: [usb_camera]
+    connection:
+      protocol: http
+      default_port: 8081
+      required_paths:
+        - GET /health
+        - POST /sensors/capture
+    hint: "Any USB camera exposing POST /sensors/capture."
+  - role: audio_input
+    description: "USB microphone with HTTP recording API"
+    device_type: sensor_node
+    sensor_type: [usb_microphone]
+    connection:
+      protocol: http
+      default_port: 8082
+      required_paths:
+        - GET /health
+        - POST /sensors/capture
+    hint: "USB microphone exposing POST /sensors/capture."
 safety:
   default_policy: sensor_only
   install_must_not_actuate: true

@@ -61,11 +61,12 @@ probes:
   passive: probes/passive_probe.py
   sensor: probes/sensor_probe.py
 registry:
-  schema: embodiment_node_registry/v1
+  schema: embodiment_node_registry/v2
   nodes:
     - id: g1_real_sensor_only
       name: G1 Sensor-Only Observer
       node_type: physical_robot
+      participant_type: robot_node
       role: robot_local_view
       safe_capabilities:
         - observe
@@ -84,9 +85,39 @@ registry:
         manipulation_allowed: false
       standalone_only: false
       endpoint_configured: false
+      tool_interface:
+        protocol: http
+        endpoint: "@role:robot_local_view"
+        operations:
+          - operation_id: health_check
+            description: "Check G1 sensor system connectivity"
+            method: GET
+            path: /health
+            input_schema: {}
+            output_schema:
+              type: object
+              properties:
+                status: {type: string, enum: ["healthy", "degraded", "offline"]}
+                sensors_online: {type: integer}
+            latency_estimate_ms: 50
+            safety_class: safe
+          - operation_id: get_state
+            description: "Get current robot state (joint angles, IMU)"
+            method: GET
+            path: /state
+            input_schema: {}
+            output_schema:
+              type: object
+              properties:
+                joint_angles: {type: array}
+                imu: {type: object}
+                timestamp: {type: number}
+            latency_estimate_ms: 30
+            safety_class: safe
     - id: g1_realsense_color_sensor
       name: G1 RealSense Color Sensor
       node_type: sensor
+      participant_type: sensor_node
       role: robot_local_view
       safe_capabilities:
         - observe
@@ -98,6 +129,53 @@ registry:
       standalone_only: false
       endpoint_configured: false
       parent_robot: g1_real_sensor_only
+      tool_interface:
+        protocol: http
+        endpoint: "@role:robot_local_view"
+        operations:
+          - operation_id: capture_frame
+            description: "Capture a single RGB frame from the G1 RealSense"
+            method: POST
+            path: /sensors/capture
+            input_schema:
+              type: object
+              properties:
+                resolution: {type: string, enum: ["720p", "1080p"], default: "1080p"}
+                format: {type: string, enum: ["jpg", "png"], default: "jpg"}
+            output_schema:
+              type: object
+              properties:
+                frame_path: {type: string}
+                timestamp: {type: number}
+                resolution: {type: string}
+            latency_estimate_ms: 200
+            safety_class: safe
+          - operation_id: health_check
+            description: "Check RealSense sensor connectivity"
+            method: GET
+            path: /health
+            input_schema: {}
+            output_schema:
+              type: object
+              properties:
+                status: {type: string, enum: ["healthy", "degraded", "offline"]}
+            latency_estimate_ms: 30
+            safety_class: safe
+
+hardware_requirements:
+  - role: robot_local_view
+    description: "Unitree G1 robot with RealSense camera and HTTP sensor API"
+    device_type: robot_node
+    sensors_required:
+      - realsense_color_camera
+    connection:
+      protocol: http
+      default_port: 8080
+      required_paths:
+        - GET /health
+        - GET /state
+        - POST /sensors/capture
+    hint: "Unitree G1 with standard HTTP sensor API."
 safety:
   default_policy: sensor_only
   install_must_not_actuate: true

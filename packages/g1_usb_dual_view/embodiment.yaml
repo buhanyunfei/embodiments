@@ -1,10 +1,10 @@
-schema: embodiment_package/v2
+schema: embodiment_package/v3
 package_id: g1_usb_dual_view
 name: G1 + USB Camera Dual-view Embodiment Context
-version: 0.3.0
+version: 0.4.0
 kind: embodiment_context
 license: Apache-2.0
-summary: Sensor-only context combining G1 RealSense ego view with an external USB camera for dual-view perception.
+summary: Dual-view collaboration context combining G1 RealSense ego view with external USB camera, with human-gated cooperation and tool interfaces.
 maintainers:
   - name: Auwomo PhysClaw Runtime
 tags:
@@ -13,20 +13,63 @@ tags:
   - dual-view
   - sensor-fusion
   - sensor-only
+  - cooperation
 primary_agent_doc: EMBODIMENT.md
+active_safety_profile: sensor_only
+
+# Hardware portability: declare WHAT hardware is needed, not WHERE it is.
+# Endpoints are filled in at mount time via bindings — no IPs in this file.
+hardware_requirements:
+  - role: robot_local_view
+    description: "Ego/first-person view robot with RealSense color camera and HTTP API"
+    device_type: robot_node
+    sensors_required:
+      - realsense_color_camera
+    min_safe_capabilities:
+      - observe
+      - perceive
+    connection:
+      protocol: http
+      default_port: 8080
+      required_paths:
+        - GET /health
+        - GET /state
+        - POST /sensors/capture
+    hint: "Tested with Unitree G1. Any robot with RealSense RGB + HTTP sensor API should work."
+  - role: external_view
+    description: "Third-person view external camera with HTTP capture API"
+    device_type: sensor_node
+    sensor_type:
+      - usb_camera
+      - ip_camera
+    min_safe_capabilities:
+      - observe
+    connection:
+      protocol: http
+      default_port: 8081
+      required_paths:
+        - GET /health
+        - POST /sensors/capture
+    hint: "Any USB or IP camera exposing POST /sensors/capture. Tested with standard v4l2-based HTTP servers."
+
 dependencies:
   embodiments:
     - package_id: unitree_g1_sensor_only
       version: '>=0.2.0'
     - package_id: usb_1080p_camera
       version: '>=0.2.0'
+
 registry:
-  schema: embodiment_node_registry/v1
+  schema: embodiment_node_registry/v2
   nodes:
     - id: g1_real_sensor_only
       name: G1 Sensor-Only Observer
       node_type: physical_robot
+      participant_type: robot_node
       role: robot_local_view
+      intelligence: actuator
+      produces: [sensor_state, health_status]
+      accepts: [command, waypoint]
       safe_capabilities:
         - observe
         - inspect
@@ -38,11 +81,46 @@ registry:
         movement_allowed: false
         manipulation_allowed: false
       standalone_only: false
-      endpoint_configured: false
+      endpoint_configured: true
+      real_device: true
+      tool_interface:
+        protocol: http
+        endpoint: "@role:robot_local_view"
+        operations:
+          - operation_id: health_check
+            description: "Check G1 sensor system connectivity"
+            method: GET
+            path: /health
+            input_schema: {}
+            output_schema:
+              type: object
+              properties:
+                status: {type: string, enum: ["healthy", "degraded", "offline"]}
+                sensors_online: {type: integer}
+            latency_estimate_ms: 50
+            safety_class: safe
+          - operation_id: get_state
+            description: "Get current robot state (joint angles, IMU)"
+            method: GET
+            path: /state
+            input_schema: {}
+            output_schema:
+              type: object
+              properties:
+                joint_angles: {type: array}
+                imu: {type: object}
+                timestamp: {type: number}
+            latency_estimate_ms: 30
+            safety_class: safe
+
     - id: g1_realsense_color_sensor
       name: G1 RealSense Color Sensor
       node_type: sensor
+      participant_type: sensor_node
       role: robot_local_view
+      intelligence: none
+      produces: [raw_perception, rgb_frame]
+      accepts: []
       safe_capabilities:
         - observe
         - perceive
@@ -51,12 +129,50 @@ registry:
       limits:
         sensor_only: true
       standalone_only: false
-      endpoint_configured: false
+      endpoint_configured: true
+      real_device: true
       parent_robot: g1_real_sensor_only
+      tool_interface:
+        protocol: http
+        endpoint: "@role:robot_local_view"
+        operations:
+          - operation_id: capture_frame
+            description: "Capture a single RGB frame from the G1 RealSense"
+            method: POST
+            path: /sensors/capture
+            input_schema:
+              type: object
+              properties:
+                resolution: {type: string, enum: ["720p", "1080p"], default: "1080p"}
+                format: {type: string, enum: ["jpg", "png"], default: "jpg"}
+            output_schema:
+              type: object
+              properties:
+                frame_path: {type: string}
+                timestamp: {type: number}
+                resolution: {type: string}
+            latency_estimate_ms: 200
+            safety_class: safe
+          - operation_id: health_check
+            description: "Check RealSense sensor connectivity"
+            method: GET
+            path: /health
+            input_schema: {}
+            output_schema:
+              type: object
+              properties:
+                status: {type: string, enum: ["healthy", "degraded", "offline"]}
+            latency_estimate_ms: 30
+            safety_class: safe
+
     - id: usb_camera_real
       name: External USB Camera
       node_type: sensor
+      participant_type: sensor_node
       role: external_view
+      intelligence: none
+      produces: [raw_perception, rgb_frame, visual_feedback]
+      accepts: []
       safe_capabilities:
         - observe
         - perceive
@@ -65,104 +181,163 @@ registry:
       limits:
         sensor_only: true
       standalone_only: false
-      endpoint_configured: false
-graphs:
-  - schema: embodiment_graph/v2
-    graph_id: sensor_only_dual_view_observation
-    name: G1 RealSense + External USB Camera Sensor-only Dual-view Observation
-    intent: Describe the workspace using both G1 ego RealSense view and an external USB third-person view, without moving any robot.
+      endpoint_configured: true
+      real_device: true
+      tool_interface:
+        protocol: http
+        endpoint: "@role:external_view"
+        operations:
+          - operation_id: capture_frame
+            description: "Capture a single frame from the external USB camera"
+            method: POST
+            path: /sensors/capture
+            input_schema:
+              type: object
+              properties:
+                resolution: {type: string, enum: ["720p", "1080p"], default: "1080p"}
+                format: {type: string, enum: ["jpg", "png"], default: "jpg"}
+            output_schema:
+              type: object
+              properties:
+                frame_path: {type: string}
+                timestamp: {type: number}
+            latency_estimate_ms: 150
+            safety_class: safe
+          - operation_id: health_check
+            description: "Check USB camera connectivity"
+            method: GET
+            path: /health
+            input_schema: {}
+            output_schema:
+              type: object
+              properties:
+                status: {type: string}
+            latency_estimate_ms: 30
+            safety_class: safe
+
+    - id: llm_planner
+      name: LLM Planning Agent
+      node_type: agent_node
+      participant_type: agent_node
+      agent_subtype: llm_agent
+      role: planner
+      intelligence: cognitive
+      produces: [command, plan, description, waypoint]
+      accepts: [raw_perception, rgb_frame, visual_feedback, sensor_state, health_status]
+      safe_capabilities:
+        - plan
+        - reason
+        - describe
+      real_device: false
+      standalone_only: false
+      tool_interface:
+        protocol: tool_call
+        endpoint: null
+        operations:
+          - operation_id: generate_plan
+            description: "Generate an execution plan for a physical task"
+            input_schema:
+              type: object
+              properties:
+                task: {type: string}
+                constraints: {type: object}
+                available_nodes: {type: array, items: {type: string}}
+              required: ["task"]
+            output_schema:
+              type: object
+              properties:
+                plan_steps: {type: array}
+                confidence: {type: number}
+            latency_estimate_ms: 3000
+            safety_class: safe
+          - operation_id: describe_scene
+            description: "Describe the current scene from provided camera frames"
+            input_schema:
+              type: object
+              properties:
+                frame_paths: {type: array, items: {type: string}}
+              required: ["frame_paths"]
+            output_schema:
+              type: object
+              properties:
+                description: {type: string}
+                objects_detected: {type: array, items: {type: string}}
+            latency_estimate_ms: 2000
+            safety_class: safe
+
+    - id: human_operator
+      name: Human Operator
+      node_type: agent_node
+      participant_type: agent_node
+      agent_subtype: human_operator
+      role: supervisor
+      intelligence: cognitive
+      produces: [command, approval]
+      accepts: [raw_perception, visual_feedback, plan, description, health_status]
+      safe_capabilities:
+        - approve
+        - supervise
+        - override
+        - rollback
+      real_device: false
+      standalone_only: false
+      tool_interface:
+        protocol: tool_call
+        endpoint: null
+        operations:
+          - operation_id: request_approval
+            description: "Request human approval for a gated action"
+            input_schema:
+              type: object
+              properties:
+                action: {type: string}
+                context: {type: string}
+                risk_level: {type: string, enum: ["low", "medium", "high"]}
+              required: ["action", "context"]
+            output_schema:
+              type: object
+              properties:
+                approved: {type: boolean}
+                reason: {type: string}
+            latency_estimate_ms: null
+            safety_class: safe
+          - operation_id: provide_feedback
+            description: "Human provides correction or guidance"
+            input_schema:
+              type: object
+              properties:
+                feedback: {type: string}
+                target_node: {type: string}
+            output_schema:
+              type: object
+              properties:
+                acknowledged: {type: boolean}
+            latency_estimate_ms: null
+            safety_class: safe
+
+cooperation_network:
+  policy_ref: policies/default_cooperation_policy.yaml
+  default_approval: approved
+  runtime_override_enabled: true
+  rollback_target: policy_file
+
+# Workflow index — full step-by-step descriptions live in EMBODIMENT.md.
+# These entries exist for programmatic discovery (intent matching, graph selection).
+workflows:
+  - id: dual_view_observation
+    description: Describe workspace using both G1 ego view and external USB third-person view
+    trigger_keywords: [describe, observe, see, look, view, scene, workspace, dual, both, angles]
     safety_level: sensor_only
-    roles:
-      - role_id: robot_local_view
-        description: Ego/first-person view from a robot-mounted RealSense color stream.
-        required_capabilities: [observe]
-        preferred_nodes: [g1_realsense_color_sensor]
-        minimum: 1
-        maximum: 1
-      - role_id: external_view
-        description: Third-person view from an external USB camera fixed in the workspace.
-        required_capabilities: [observe]
-        preferred_nodes: [usb_camera_real]
-        minimum: 1
-        maximum: 1
-      - role_id: perception_model
-        description: VLM/perception model that fuses the two views into a scene description.
-        required_capabilities: [image_understanding]
-        minimum: 1
-        maximum: 1
-    nodes:
-      - id: g1_realsense_color_sensor
-        role: robot_local_view
-        node_type: sensor
-        required_capabilities: [observe]
-      - id: usb_camera_real
-        role: external_view
-        node_type: sensor
-        required_capabilities: [observe]
-      - id: perception_vision
-        role: perception_model
-        node_type: perception_model
-        required_capabilities: [image_understanding]
-    edges:
-      - source: g1_realsense_color_sensor
-        target: perception_vision
-        edge_type: observation_stream
-      - source: usb_camera_real
-        target: perception_vision
-        edge_type: observation_stream
-    constraints:
-      allow_motion: false
-      allow_manipulation: false
-      allow_audio_output: false
-      forbidden_actions:
-        - navigate
-        - walk
-        - move
-        - turn
-        - grasp
-        - pick
-        - place
-        - carry
-        - hand_over
-        - open_door
-        - whole_body_motion
-        - arm_motion
-        - hand_motion
-        - audio_output
-    readiness_checks:
-      - all_required_nodes_exist
-      - required_capabilities_are_safe
-      - sensor_artifacts_available_or_capture_allowed
-      - no_forbidden_action_in_task
-    failure_modes:
-      - id: node_missing
-        when: g1_realsense_color_sensor or usb_camera_real not in topology
-        attribution: topology
-      - id: node_offline
-        when: capture probe fails for either sensor
-        attribution: hardware
-      - id: forbidden_action_requested
-        when: task asks for any locomotion/manipulation/audio_output
-        attribution: planner
-      - id: sensor_artifact_missing
-        when: at least one expected frame file is not produced
-        attribution: sensor
-    recovery:
-      auto_allowed:
-        - retry_passive_health_check
-        - downgrade_multiview_to_single_view
-      requires_confirmation:
-        - any_motion
-        - any_manipulation
-        - audio_output
-      not_recoverable:
-        - missing_capable_executor
-    outputs:
-      - dual_view_scene_description
-      - sensor_readiness_report
-      - failure_attribution
-      - episode_trace
+    primary_nodes: [g1_realsense_color_sensor, usb_camera_real, llm_planner, human_operator]
+
+  - id: sensor_health_audit
+    description: Check connectivity and readiness of all hardware sensors
+    trigger_keywords: [health, status, check, ready, online, connectivity, audit]
+    safety_level: sensor_only
+    primary_nodes: [g1_real_sensor_only, g1_realsense_color_sensor, usb_camera_real, llm_planner]
+
 safety:
+  active_safety_profile: sensor_only
   default_policy: sensor_only
   install_must_not_actuate: true
   requires_confirmation_for:
@@ -185,11 +360,23 @@ safety:
     - arm_motion
     - hand_motion
     - audio_output
+
 integration:
-  exposes_agent_context: true
-  compatible_with:
-    - auwomo_physclaw
-    - openclaw_like_runtime
+  capabilities:
+    - context_v3
+    - tools_v1
+    - cooperation_v1
+  compatible_runtimes:
+    - codex>=0.4
+    - openclaw>=1.0
+    - auwomo_physclaw>=0.4
+  context_injection:
+    target: system_prompt
+  tool_registration:
+    format: openai_function
+    auto_register: true
+    respect_dormant: true
+
 compatibility:
-  runtime: auwomo_physclaw>=0.3
+  runtime: auwomo_physclaw>=0.4
   python: '>=3.9'
