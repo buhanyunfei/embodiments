@@ -41,6 +41,10 @@ python builder/build_embodiment.py validate packages/g1_usb_dual_view
 # Build → dist/<id>-<version>.embodiment.zip
 python builder/build_embodiment.py build packages/g1_usb_dual_view --out dist
 
+# Install a built package to the convention directory
+python -m embodiments install dist/usb_1080p_camera-0.2.0.embodiment.zip
+# Manual equivalent: unzip dist/usb_1080p_camera-0.2.0.embodiment.zip -d ~/.embodiments/packages/
+
 # Generate context package from topology (deterministic-first)
 python composer/compose_context.py generate \
   --topology hub/topology_snapshot.json \
@@ -62,12 +66,34 @@ composer/           ← topology → package generator (deterministic-first)
 runtime/            ← EmbodimentLoader (what agent systems actually import)
 ```
 
+### Installation Model (Skills-style, not pip)
+
+Embodiment packages are **data files (yaml + md + scripts), not Python modules**. Distribution follows the Skills convention — drop a directory into the agreed location, loader finds it automatically. No pip, no compilation, no registration.
+
+```
+~/.embodiments/
+  packages/                    ← loader scans here by default (no config needed)
+    usb_1080p_camera/
+      EMBODIMENT.md
+      embodiment.yaml
+      adapters/usb_camera_adapter.py
+  dist/                        ← original zip archives kept here
+    usb_1080p_camera-0.2.0.embodiment.zip
+```
+
+"Installing" = unzipping to the convention directory. Dev workflow = symlink (`ln -s ./packages/my_robot ~/.embodiments/packages/my_robot`).
+
+The only thing that needs Python import machinery is `runtime/` (the loader itself). Package files never need to be on `sys.path`.
+
+**DO NOT add a pip-installable package for embodiment packages** — they are filesystem artifacts, not Python modules. This matches how Skills work: `~/.qwenpaw/working/skills/my_skill/SKILL.md`.
+
 ### Runtime Loader — the main interface
 
 ```python
 from embodiments.runtime.loader import EmbodimentLoader
 
-loader = EmbodimentLoader(config_path="./embodiments.yaml")
+# No config needed — auto-discovers ~/.embodiments/packages/ by default
+loader = EmbodimentLoader()
 loader.discover()
 loader.activate("g1_usb_dual_view", bindings={
     "robot_local_view": "http://192.168.1.100:8080",
@@ -76,7 +102,11 @@ loader.activate("g1_usb_dual_view", bindings={
 
 context = loader.get_context()    # EMBODIMENT.md → inject into system prompt
 tools = loader.get_tools()        # OpenAI-format tool definitions
-result = loader.dispatch_tool("g1_realsense_color_sensor.capture_frame", {})
+
+# dispatch_tool() enforces safety gates and returns ROUTING METADATA ONLY — it does NOT make HTTP calls
+meta = loader.dispatch_tool("g1_realsense_color_sensor.capture_frame", {})
+# → {"success": True, "endpoint": "http://...", "method": "POST", "path": "/sensors/capture", ...}
+# The agent system must execute the actual HTTP call itself (or use execute_tool when available)
 
 # Cooperation management
 loader.cooperation_revoke("pkg", "node_a", "node_b", "operator_id")
@@ -127,29 +157,52 @@ loader.hot_plug("./dist/new-0.1.0.embodiment.zip", bindings={...})
 - **DO NOT make the builder contact hardware** — it must remain offline.
 - **DO NOT add complex graph YAML schemas** — we deliberately simplified from 265-line graph definitions to 10-line workflow indexes. Collaboration flows belong in EMBODIMENT.md as markdown.
 - **DO NOT duplicate what agent systems already do** — we are a peer component, not a replacement for Skills/MCP/Tools.
+- **DO NOT ship adapter placeholders** — if `embodiment.yaml` declares `adapters: [{entrypoint: adapters/foo.py}]`, that file must exist and work standalone. A README pointing to an external project is not an adapter. The "5-minute test": someone with the same hardware, git cloning only this package, must be able to run it in 5 minutes without any other repo.
+- **DO NOT use pip to distribute packages** — packages are filesystem artifacts (yaml+md+scripts), not Python modules. Use the `~/.embodiments/packages/` convention. Only `runtime/` needs to be importable as Python.
+
+## Probe Output Format (invariant)
+
+All `passive_probe.py` and `sensor_probe.py` files MUST output valid JSON to stdout, never Python dict literals:
+
+```json
+{"ok": true, "devices": ["/dev/video0"], "error": null}
+```
+
+`ast.literal_eval()` fallback is not acceptable in integrating agent systems. When writing or fixing probes, use `json.dumps()`, not `print(dict)`.
 
 ## What Needs Optimization / TODO
 
-### High Priority
+### P0 — Breaks "shareable" promise
 
-1. **specs/ are stale** — specs still reference the old execution engine and verbose graph schema. Need updating to match current simplified architecture.
-2. **generated/ outputs are outdated** — old composer outputs from before the workflows refactor. Should regenerate or delete.
-3. **EMBODIMENT.md for device packages** — `unitree_g1_sensor_only` and `usb_1080p_camera` have minimal EMBODIMENT.md files that don't follow the v3 section format. Could be improved.
-4. **End-to-end onboarding test** — the `skills/onboard-embodiment/onboard.py` references the old graph format in places. Needs sync with current architecture.
+1. **`usb_1080p_camera` needs a real adapter** — `adapters/` contains only a README pointing to Auwomo's hub code. A 50-line stdlib HTTP server (ffmpeg for capture) would make the package self-contained. The "5-minute test" currently fails for anyone without Auwomo. Same applies to `sensor_probe.py` which delegates to external runtime.
+2. **Default discovery paths in loader** — `EmbodimentLoader().discover()` returns `[]` with no config. Add default scan: `~/.embodiments/packages/`, `~/.embodiments/dist/`, `./embodiments/packages/`. Convention over configuration, same as Skills.
+3. **`python -m embodiments install <zip>` CLI** — "install" is currently manual unzip. A thin CLI wrapper (stdlib only) completes the Skills-style install UX.
+
+### P1 — Execution loop not closed
+
+4. **`execute_tool()` method on loader** — `dispatch_tool()` returns routing metadata only; every agent system must write its own HTTP client to complete the call. Add optional `execute_tool(name, args) → {"success": bool, "data": {...}}` that performs the `httpx.post()` after the safety gate. This is not orchestration — it's the final step of a single tool-call lifecycle.
+5. **`check_readiness(package_id)` + `get_adapter_contract(package_id)`** — enables the agentic bootstrap flow: `discover → check_readiness → "needs_adapter" → agent generates adapter from contract → validate → activate`. `get_adapter_contract()` extracts `required_paths`, operation schemas, port, and device_paths into a structured dict ready for code-gen prompting.
+
+### P2 — Spec compliance
+
+6. **Fix probe output format** — `unitree_g1/passive_probe.py` outputs Python dict literal (single-quoted). All probes must output valid JSON (see Probe Output Format section above).
+7. **`onboard-embodiment` skill has Auwomo-specific steps** — Step 1 calls `robot_node_onboarding.cli`, Step 2 posts to `localhost:8765/topology/...`. Add standalone mode: probe → generate adapter contract → validate → activate.
 
 ### Medium Priority
 
-5. **Composer still has dead code** — `SCHEMA_GRAPH` constant, some old v2-related helpers that are no longer called.
-6. **Anthropic tool format** — currently only generates OpenAI function-call format. Adding Anthropic tool format would expand compatibility.
-7. **Capability matching** — `activate()` could optionally probe bound endpoints to verify they satisfy `hardware_requirements.required_paths`.
-8. **Templates outdated** — `templates/context_package/` still has old-format templates.
+8. **specs/ are stale** — specs still reference the old execution engine and verbose graph schema. Need updating to match current simplified architecture.
+9. **generated/ outputs are outdated** — old composer outputs from before the workflows refactor. Should regenerate or delete.
+10. **EMBODIMENT.md for device packages** — `unitree_g1_sensor_only` and `usb_1080p_camera` have minimal EMBODIMENT.md files that don't follow the v3 section format.
+11. **Composer still has dead code** — `SCHEMA_GRAPH` constant, some old v2-related helpers that are no longer called.
+12. **Anthropic tool format** — currently only generates OpenAI function-call format. Adding Anthropic tool format would expand compatibility.
+13. **Templates outdated** — `templates/context_package/` still has old-format templates.
 
 ### Low Priority / Future
 
-9. **Package registry** — npm-style index for discovering community packages.
-10. **ROS/gRPC adapters** — currently only HTTP dispatch metadata; extending to ROS topics or gRPC services.
-11. **Multi-agent cooperation policies** — more granular permission models beyond approve/deny per pair.
-12. **CI/testing** — no automated tests exist yet. The validation chain works (`python -c "from runtime import EmbodimentLoader"`) but needs proper test files.
+14. **Package registry** — npm-style index for discovering community packages.
+15. **ROS/gRPC adapters** — currently only HTTP dispatch metadata; extending to ROS topics or gRPC services.
+16. **Multi-agent cooperation policies** — more granular permission models beyond approve/deny per pair.
+17. **CI/testing** — no automated tests exist yet. The validation chain works (`python -c "from runtime import EmbodimentLoader"`) but needs proper test files.
 
 ## File Map (what's what)
 

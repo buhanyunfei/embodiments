@@ -3,4 +3,5 @@
 
 Real frame capture should be performed by the runtime adapter to avoid hardcoding devices here.
 """
-print({"ok": False, "error": "use_runtime_usb_camera_adapter_for_frame_capture"})
+import json
+print(json.dumps({"ok": False, "devices": [], "error": "use_runtime_usb_camera_adapter_for_frame_capture"}))

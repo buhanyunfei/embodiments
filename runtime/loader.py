@@ -231,11 +231,24 @@ class EmbodimentLoader:
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
     def discover(self) -> List[str]:
-        """Scan configured directories for packages. Auto-activates configured ones."""
-        scan_dirs = self._config.get("scan_dirs") or []
+        """Scan configured directories for packages. Auto-activates configured ones.
+
+        Default scan order (no config needed):
+          ~/.embodiments/packages/
+          ~/.embodiments/dist/
+          ./embodiments/packages/   (project-local)
+        Extra dirs can be appended via config scan_dirs.
+        """
+        default_dirs: List[Path] = [
+            Path.home() / ".embodiments" / "packages",
+            Path.home() / ".embodiments" / "dist",
+            Path.cwd() / "embodiments" / "packages",
+        ]
+        extra_dirs: List[Path] = [Path(d) for d in (self._config.get("scan_dirs") or [])]
+        scan_dirs: List[Path] = default_dirs + extra_dirs
+
         discovered = []
-        for d in scan_dirs:
-            dp = Path(d)
+        for dp in scan_dirs:
             if not dp.exists():
                 continue
             for zf in dp.glob("*.embodiment.zip"):

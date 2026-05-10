@@ -3,4 +3,5 @@
 
 This script is intentionally read-only. Fill connection details during runtime onboarding.
 """
-print({"ok": False, "error": "template_probe_requires_runtime_connection_hints"})
+import json
+print(json.dumps({"ok": False, "devices": [], "error": "template_probe_requires_runtime_connection_hints"}))
